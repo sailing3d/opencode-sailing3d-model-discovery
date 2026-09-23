@@ -1,0 +1,29 @@
+{
+  "name": "opencode-sailing3d-model-discovery",
+  "version": "0.1.0",
+  "description": "OpenCode v2 plugin to discover Sailing3D gateway models and enrich them with models.dev metadata",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "files": [
+    "index.ts",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.0.14 <3"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.0.14",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --experimental-strip-types test/smoke.ts"
+  }
+}
