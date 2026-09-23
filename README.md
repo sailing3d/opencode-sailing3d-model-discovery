@@ -1,67 +1,57 @@
-# OpenCode Sailing3D Model Discovery
+# OpenCode Sailing3D 模型发现插件
 
-An OpenCode v2 plugin that discovers model IDs from the Sailing3D New API gateway
-and enriches them with context limits, modalities, cost, and family metadata from
-the [models.dev](https://models.dev) snapshot that OpenCode already keeps in its
-cache. It runs without an LLM and does not edit OpenCode configuration files.
+一个 OpenCode v2 插件：从 Sailing3D New API 网关发现模型 ID，并用 OpenCode 已缓存的
+[models.dev](https://models.dev) 快照补充上下文长度、模态、价格和 family 等元数据。
+插件不依赖 LLM，也不会修改 OpenCode 配置文件。
 
-## Requirements
+## 环境要求
 
-- OpenCode v2.0.14 or later
-- Node.js 22+ for the local checks
-- A Sailing3D API key available to the OpenCode server, through either:
-  - the `SAILING3D_API_KEY` environment variable, or
-  - a **Sailing3D Gateway** account saved with `/connect`
+- OpenCode v2.0.14 或更高
+- 本地校验需要 Node.js 22+
+- OpenCode 服务器进程可用的 Sailing3D API Key，来源二选一：
+  - 环境变量 `SAILING3D_API_KEY`
+  - 通过 `/connect` 保存的 **Sailing3D Gateway** 账号
 
-## Install
+## 安装
 
 ```sh
 opencode plugin add github:sailing3d/opencode-sailing3d-model-discovery
 opencode plugin list
 ```
 
-## Credentials
+## 凭据
 
-The plugin resolves the discovery key in this order:
+插件按以下顺序解析用于「模型发现」的 key：
 
-1. `SAILING3D_API_KEY` in the OpenCode server environment (primary).
-2. A literal `apiKey` in the configured provider settings.
-3. The credential saved through `/connect` for **Sailing3D Gateway**.
+1. OpenCode 服务器环境里的 `SAILING3D_API_KEY`（优先）。
+2. provider 配置里直接写的 `apiKey`。
+3. 通过 `/connect` 为 **Sailing3D Gateway** 保存的凭据。
 
-If none is available the plugin does not fail: it keeps the last successful
-inventory from its cache and logs how to connect.
+都取不到时插件不会失败：会沿用缓存里上一次成功的模型清单，并提示如何连接。
 
-The plugin registers the `sailing3d` provider with the
-`@opencode/ai/providers/openai-compatible` package and binds its `integrationID`
-to `sailing3d`, so `/connect` manages the saved account. The secret is never
-written to configuration; the provider setting keeps the
-`{env:SAILING3D_API_KEY}` placeholder.
+插件用 `@opencode/ai/providers/openai-compatible` 注册 `sailing3d` provider，并把它的
+`integrationID` 绑定到 `sailing3d`，因此由 `/connect` 管理保存的账号。密钥不会写入配置；
+provider 设置里保留 `{env:SAILING3D_API_KEY}` 占位符。
 
-## What it does
+## 工作原理
 
-At startup the plugin requests the gateway model list and reads OpenCode's cached
-models.dev snapshot (`~/.cache/opencode/models.json`; `$XDG_CACHE_HOME` and
-`%USERPROFILE%` are honoured), then merges the results into the `sailing3d`
-provider. It refreshes every six hours, re-reads the cache on each refresh and
-immediately after OpenCode publishes its `models-dev.refreshed` event, and keeps
-the last successful inventory if a later refresh fails. OpenCode maintains
-that cache itself, so by default the plugin performs no additional models.dev
-request; if the cache is missing it falls back to OpenCode's documented defaults
-(tools on, text and image input, 200k context, 32k output). Set `catalogFallback`
-to let the plugin fetch models.dev when the cache is missing, stale, or lacks
-metadata for a discovered model. Explicitly configured models that discovery does
-not return are preserved. The gateway's model ID remains the OpenCode model ID; a
-small explicit alias map connects gateway names to models.dev slugs such as
-`k3-256k`.
+启动时插件请求网关的模型列表，并读取 OpenCode 缓存的 models.dev 快照
+（`~/.cache/opencode/models.json`；兼容 `$XDG_CACHE_HOME` 与 `%USERPROFILE%`），然后合并进
+`sailing3d` provider。它每 6 小时刷新一次，并在每次刷新以及 OpenCode 发布
+`models-dev.refreshed` 事件后立即重读缓存；若后续刷新失败则保留上一次成功的清单。
 
-models.dev can contain different records for the same model from different
-providers. The plugin uses a deterministic provider preference for known models
-and emits a warning when records conflict. If metadata is missing, it uses
-OpenCode's documented fallback assumptions and logs that fact.
+该缓存由 OpenCode 自行维护，因此**默认情况下插件不会额外请求 models.dev**；缓存缺失时退回
+OpenCode 的文档默认值（tools 开启、text+image 输入、200k 上下文、32k 输出）。设置
+`catalogFallback` 后，插件会在缓存缺失、过期、或缺少某个已发现模型的元数据时去请求
+models.dev。发现结果里没有、但配置中显式定义的模型会被保留。网关的模型 ID 就是 OpenCode
+的模型 ID；一个小型显式别名表把网关名称映射到 models.dev 的 slug（例如 `k3-256k`）。
 
-## Options
+同一个模型在 models.dev 里可能来自不同 provider 且记录不同。插件对已知模型使用确定的
+provider 优先级，并在记录冲突时告警。缺少元数据时使用 OpenCode 的文档默认假设，并记录这一事实。
 
-Pass options with the object form in `opencode.json(c)`:
+## 选项
+
+在 `opencode.json(c)` 中用对象形式传入选项：
 
 ```jsonc
 {
@@ -74,28 +64,30 @@ Pass options with the object form in `opencode.json(c)`:
         "catalog": true,
         "timeoutMs": 15000,
         "includeModels": ["^glm-"],
-        "excludeModels": ["-preview$"]
+        "excludeModels": ["-preview$"],
+        // 缓存缺失 / 过期 / 缺条目时联网兜底
+        "catalogFallback": true
       }
     }
   ]
 }
 ```
 
-| Option | Type | Default | Purpose |
+| 选项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `baseURL` | `string` | `https://ai-api.sailing3d.cn/v1` | Gateway base URL. |
-| `gatewayURL` | `string` | `${baseURL}/models` | Full gateway models endpoint. |
-| `catalogFile` | `string` | `~/.cache/opencode/models.json` | Path to OpenCode's models.dev cache. |
-| `catalogFallback` | `boolean \| string` | unset (cache only) | Fetch models.dev when the cache is missing, stale, or incomplete. `true` uses `https://models.dev/api.json`. |
-| `catalogMaxAgeMs` | `number` | `86400000` | Cache age after which `catalogFallback` is consulted. |
-| `refreshMs` | `number` | `21600000` | Refresh interval in milliseconds. |
-| `refreshHours` | `number` | `6` | Refresh interval in hours. |
-| `timeoutMs` | `number` | `15000` | Per-request timeout. |
-| `catalog` | `boolean` | `true` | Set `false` to skip models.dev enrichment. |
-| `includeModels` | `string[]` | `[]` | Keep only ids matching one of these regular expressions. |
-| `excludeModels` | `string[]` | `[]` | Drop ids matching any of these regular expressions. |
+| `baseURL` | `string` | `https://ai-api.sailing3d.cn/v1` | 网关基础 URL。 |
+| `gatewayURL` | `string` | `${baseURL}/models` | 完整的网关模型列表端点。 |
+| `catalogFile` | `string` | `~/.cache/opencode/models.json` | OpenCode 的 models.dev 缓存路径。 |
+| `catalogFallback` | `boolean \| string` | 未设置（仅缓存） | 缓存缺失、过期或不完整时请求 models.dev。`true` 使用 `https://models.dev/api.json`。 |
+| `catalogMaxAgeMs` | `number` | `86400000` | 超过该缓存年龄后才会启用 `catalogFallback`。 |
+| `refreshMs` | `number` | `21600000` | 刷新间隔（毫秒）。 |
+| `refreshHours` | `number` | `6` | 刷新间隔（小时）。 |
+| `timeoutMs` | `number` | `15000` | 单次请求超时。 |
+| `catalog` | `boolean` | `true` | 设为 `false` 可跳过 models.dev 元数据补充。 |
+| `includeModels` | `string[]` | `[]` | 只保留匹配任一正则的模型 id。 |
+| `excludeModels` | `string[]` | `[]` | 丢弃匹配任一正则的模型 id。 |
 
-## Development checks
+## 开发校验
 
 ```sh
 npm ci
@@ -103,14 +95,12 @@ npm run check
 npm test
 ```
 
-The smoke test uses fixture responses and does not call the gateway. The plugin
-itself reads the credential only from the server environment or OpenCode's
-credential store and never prints or persists it.
+冒烟测试使用固定 fixture，不会请求网关。插件只在服务器环境或 OpenCode 凭据存储中读取凭据，
+从不打印或持久化它。
 
-### Testing locally
+### 本地测试
 
-OpenCode does not inject `@opencode/plugin` into plugins loaded from a bare local
-directory, so a local checkout must be installed as a package:
+OpenCode 不会为「裸本地目录」加载的插件注入 `@opencode/plugin`，因此本地检出必须作为包安装：
 
 ```sh
 opencode plugin add "git+file:///absolute/path/to/opencode-sailing3d-model-discovery"
