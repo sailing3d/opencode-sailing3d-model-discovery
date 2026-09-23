@@ -29,7 +29,7 @@ development dependencies:
 ```sh
 git clone https://github.com/sailing3d/opencode-sailing3d-model-discovery.git
 cd opencode-sailing3d-model-discovery
-npm install --package-lock=false
+npm ci
 ```
 
 Use a separate HOME/config directory and `--standalone` to test without
