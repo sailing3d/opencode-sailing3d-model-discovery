@@ -34,10 +34,10 @@ type PluginOptions = {
   /** Set to false to skip models.dev metadata enrichment. */
   catalog?: boolean
   /**
-   * Opt-in network fallback for the models.dev catalog. `true` uses
-   * `https://models.dev/api.json`; a string sets a custom URL. When set, the
-   * cache is used normally but the URL is fetched if the cache is missing,
-   * older than `catalogMaxAgeMs`, or lacks metadata for a discovered model.
+   * Network fallback for the models.dev catalog. Enabled by default using
+   * `https://models.dev/api.json`; a string sets a custom URL. The URL is only
+   * fetched when the cache is missing, older than `catalogMaxAgeMs`, or lacks
+   * metadata for a discovered model. Set `false` to stay strictly cache-only.
    */
   catalogFallback?: string | boolean
   /** Cache age in milliseconds after which `catalogFallback` is consulted. */
@@ -295,8 +295,10 @@ async function fetchCatalog(url: string, timeoutMs: number): Promise<CatalogResp
 }
 
 function resolveCatalogFallback(value: unknown): string | undefined {
-  if (value === true) return DEFAULT_CATALOG_FALLBACK_URL
-  return stringOption(value)
+  // Enabled by default; `false` opts out to stay strictly cache-only.
+  if (value === false) return undefined
+  if (value === true || value === undefined) return DEFAULT_CATALOG_FALLBACK_URL
+  return stringOption(value) ?? DEFAULT_CATALOG_FALLBACK_URL
 }
 
 async function discover(input: {

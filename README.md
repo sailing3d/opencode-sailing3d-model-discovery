@@ -40,11 +40,12 @@ provider 设置里保留 `{env:SAILING3D_API_KEY}` 占位符。
 `sailing3d` provider。它每 6 小时刷新一次，并在每次刷新以及 OpenCode 发布
 `models-dev.refreshed` 事件后立即重读缓存；若后续刷新失败则保留上一次成功的清单。
 
-该缓存由 OpenCode 自行维护，因此**默认情况下插件不会额外请求 models.dev**；缓存缺失时退回
-OpenCode 的文档默认值（tools 开启、text+image 输入、200k 上下文、32k 输出）。设置
-`catalogFallback` 后，插件会在缓存缺失、过期、或缺少某个已发现模型的元数据时去请求
-models.dev。发现结果里没有、但配置中显式定义的模型会被保留。网关的模型 ID 就是 OpenCode
-的模型 ID；一个小型显式别名表把网关名称映射到 models.dev 的 slug（例如 `k3-256k`）。
+该缓存由 OpenCode 自行维护。`catalogFallback` **默认开启**：插件只在缓存缺失、过期、或缺少
+某个已发现模型的元数据时，才去请求 `https://models.dev/api.json`；设
+`catalogFallback: false` 可完全离线（此时退回 OpenCode 的文档默认值：tools 开启、text+image
+输入、200k 上下文、32k 输出）。发现结果里没有、但配置中显式定义的模型会被保留。网关的模型
+ID 就是 OpenCode 的模型 ID；一个小型显式别名表把网关名称映射到 models.dev 的 slug（例如
+`k3-256k`）。
 
 同一个模型在 models.dev 里可能来自不同 provider 且记录不同。插件对已知模型使用确定的
 provider 优先级，并在记录冲突时告警。缺少元数据时使用 OpenCode 的文档默认假设，并记录这一事实。
@@ -65,7 +66,7 @@ provider 优先级，并在记录冲突时告警。缺少元数据时使用 Open
         "timeoutMs": 15000,
         "includeModels": ["^glm-"],
         "excludeModels": ["-preview$"],
-        // 缓存缺失 / 过期 / 缺条目时联网兜底
+        // 默认开启；设 false 可完全离线
         "catalogFallback": true
       }
     }
@@ -78,7 +79,7 @@ provider 优先级，并在记录冲突时告警。缺少元数据时使用 Open
 | `baseURL` | `string` | `https://ai-api.sailing3d.cn/v1` | 网关基础 URL。 |
 | `gatewayURL` | `string` | `${baseURL}/models` | 完整的网关模型列表端点。 |
 | `catalogFile` | `string` | `~/.cache/opencode/models.json` | OpenCode 的 models.dev 缓存路径。 |
-| `catalogFallback` | `boolean \| string` | 未设置（仅缓存） | 缓存缺失、过期或不完整时请求 models.dev。`true` 使用 `https://models.dev/api.json`。 |
+| `catalogFallback` | `boolean \| string` | `true` | 缓存缺失、过期或不完整时请求 models.dev（默认开启）。设 `false` 则仅用缓存、完全离线；字符串可指定自定义 URL。 |
 | `catalogMaxAgeMs` | `number` | `86400000` | 超过该缓存年龄后才会启用 `catalogFallback`。 |
 | `refreshMs` | `number` | `21600000` | 刷新间隔（毫秒）。 |
 | `refreshHours` | `number` | `6` | 刷新间隔（小时）。 |

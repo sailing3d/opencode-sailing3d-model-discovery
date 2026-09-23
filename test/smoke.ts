@@ -266,10 +266,12 @@ process.env.SAILING3D_API_KEY = "env-key"
   await cleanup?.()
 }
 
-// 6. A missing models.dev cache falls back to OpenCode defaults without failing.
+// 6. A missing models.dev cache stays offline when catalogFallback is disabled.
 {
   process.env.SAILING3D_API_KEY = "env-key"
-  const { context, state } = createContext({ options: { catalogFile: join(catalogDir, "missing.json") } })
+  const { context, state } = createContext({
+    options: { catalogFile: join(catalogDir, "missing.json"), catalogFallback: false },
+  })
   const cleanup = await plugin.setup(context)
   assert.deepEqual(state.replacedModels.map(({ id }) => id), ids)
   assert.equal(state.replacedModels[0].limit.context, 200_000)
@@ -307,12 +309,12 @@ process.env.SAILING3D_API_KEY = "env-key"
   await cleanup?.()
 }
 
-// 9. catalogFallback fetches models.dev when the cache is missing.
+// 9. catalogFallback is on by default and fetches models.dev when the cache is missing.
 {
   process.env.SAILING3D_API_KEY = "env-key"
   const before = remoteCatalogFetches
   const { context, state } = createContext({
-    options: { catalogFile: join(catalogDir, "missing-fallback.json"), catalogFallback: true },
+    options: { catalogFile: join(catalogDir, "missing-fallback.json") },
   })
   const cleanup = await plugin.setup(context)
   assert.equal(remoteCatalogFetches, before + 1)
