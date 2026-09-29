@@ -8,9 +8,11 @@
 
 - OpenCode v2.0.14 或更高
 - 本地校验需要 Node.js 22+
-- OpenCode 服务器进程可用的 Sailing3D API Key，来源二选一：
-  - 环境变量 `SAILING3D_API_KEY`
-  - 通过 `/connect` 保存的 **Sailing3D Gateway** 账号
+- Sailing3D API Key，来源二选一：
+  - 通过 `/connect` 保存的 **Sailing3D Gateway** 账号（推荐）
+  - provider 配置里显式写的 `apiKey`
+
+插件不读取任何环境变量（见下方「凭据」）。
 
 ## 安装
 
@@ -23,33 +25,38 @@ opencode plugin list
 
 插件按以下顺序解析用于「模型发现」的 key：
 
-1. OpenCode 服务器环境里的 `SAILING3D_API_KEY`（优先）。
-2. provider 配置里直接写的 `apiKey`。
-3. 通过 `/connect` 为 **Sailing3D Gateway** 保存的凭据。
+1. provider 配置里直接写的 `apiKey`（不是 `{env:...}` 占位符）。
+2. 通过 `/connect` 为 **Sailing3D Gateway** 保存的凭据。
 
-都取不到时插件不会失败：会沿用缓存里上一次成功的模型清单，并提示如何连接。
+插件**不读取环境变量**：`SAILING3D_API_KEY` 既不是凭据来源，也不会被注册成 integration 的
+`env` 方法，因此 `opencode auth list` 里不会再出现这一行。
+
+两者都取不到时，插件不会再用旧清单兜底，而是**删除 `sailing3d` provider 并清空缓存的模型清单**，
+模型选择器里的 Sailing3D 模型随之消失。之后用 `/connect` 连上（或写显式 `apiKey`）并运行
+`opencode reload` 即可恢复。
 
 ### `/connect` 与 integration 注册
 
 插件用 `@opencode/ai/providers/openai-compatible` 注册 `sailing3d` provider。OpenCode 只按
 provider 的 `integrationID` **引用**凭据来源，integration 本身不会自动存在，所以插件在启动时用
-`ctx.integration.transform` 注册 `sailing3d`（显示名 **Sailing3D Gateway**），并声明两种方法：
+`ctx.integration.transform` 注册 `sailing3d`（显示名 **Sailing3D Gateway**），只声明一种方法：
 
 - `key`：在 TUI 里 `/connect` → 选择 **Sailing3D Gateway** 并粘贴密钥；也可用
   `opencode auth login sailing3d --method key`。凭据由 OpenCode 存进凭据库（SQLite），不写进配置。
-- `env`：服务器进程存在 `SAILING3D_API_KEY` 时自动成为一个可用连接，不需要 `/connect`。
+
+启动时插件还会调用 `method.remove` 注销 0.3.0 遗留的 `env` 方法，避免残留的环境变量在
+`opencode auth list` 里显示成一个连接。
 
 注册是运行期行为，每次启动重新注册，不会改写配置文件。
 
-provider 设置里保留 `{env:SAILING3D_API_KEY}` 占位符，避免密钥进入 provider 注册表。注意
-OpenCode 不会对插件注入的 provider 设置做 `{env:...}` 替换，请求的实际认证来自上面的
-integration。若不想使用 `/connect`，也可以在配置里显式声明：
+provider 设置里保留 `{env:SAILING3D_API_KEY}` 占位符：OpenCode 不会对插件注入的 provider 设置做
+`{env:...}` 替换，真实认证来自上面的 integration。若不想使用 `/connect`，可以在配置里显式提供：
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "providers": {
-    "sailing3d": { "env": ["SAILING3D_API_KEY"] }
+    "sailing3d": { "settings": { "apiKey": "sk-..." } }
   }
 }
 ```
@@ -59,7 +66,11 @@ integration。若不想使用 `/connect`，也可以在配置里显式声明：
 启动时插件请求网关的模型列表，并读取 OpenCode 缓存的 models.dev 快照
 （`~/.cache/opencode/models.json`；兼容 `$XDG_CACHE_HOME` 与 `%USERPROFILE%`），然后合并进
 `sailing3d` provider。它每 6 小时刷新一次，并在每次刷新以及 OpenCode 发布
-`models-dev.refreshed` 事件后立即重读缓存；若后续刷新失败则保留上一次成功的清单。
+`models-dev.refreshed` 事件后立即重读缓存。
+
+「上一次成功的清单」只在**凭据仍然可用、但某次发现请求失败**时作为兜底。凭据本身消失时
+（注销 `/connect` 且没有显式 `apiKey`），插件会在启动、`opencode reload` 或下一次刷新时
+删除 `sailing3d` provider 并清空缓存清单。
 
 该缓存由 OpenCode 自行维护。`catalogFallback` **默认开启**：插件只在缓存缺失、过期、或缺少
 某个已发现模型的元数据时，才去请求 `https://models.dev/api.json`；设
@@ -117,8 +128,8 @@ npm run check
 npm test
 ```
 
-冒烟测试使用固定 fixture，不会请求网关。插件只在服务器环境或 OpenCode 凭据存储中读取凭据，
-从不打印或持久化它。
+冒烟测试使用固定 fixture，不会请求网关。插件只从 OpenCode 凭据存储或显式 provider 配置读取
+凭据，从不打印或持久化它。
 
 ### 本地测试
 

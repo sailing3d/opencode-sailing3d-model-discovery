@@ -9,7 +9,12 @@ const providerID = Provider.ID.make("sailing3d")
 // /connect and `opencode auth login` report "Integration not found".
 const integrationID = "sailing3d"
 const integrationName = "Sailing3D Gateway"
-const API_KEY_ENV = "SAILING3D_API_KEY"
+// 0.3.0 also declared an `env` credential method for this variable and read the
+// variable directly. 0.4.0 dropped both: discovery only accepts a `/connect`
+// credential or an explicit provider `apiKey`, so an environment variable alone
+// can no longer keep the provider alive. The name is kept so the legacy method
+// can be unregistered at startup, and as the provider's inert settings placeholder.
+const LEGACY_API_KEY_ENV = "SAILING3D_API_KEY"
 const cacheKey = "sailing3d-model-inventory-v1"
 
 const DEFAULT_BASE_URL = "https://ai-api.sailing3d.cn/v1"
@@ -363,12 +368,10 @@ async function discover(input: {
   })
 }
 
+// Credentials are never read from the process environment: only an explicit
+// provider `apiKey` or a credential saved through `/connect` are accepted.
 async function resolveApiKey(ctx: { provider: any; integration: any }): Promise<string | undefined> {
-  // 1. Environment variable (primary).
-  const fromEnv = process.env[API_KEY_ENV]
-  if (fromEnv) return fromEnv
-
-  // 2. Explicit provider key that is not an `{env:...}` placeholder.
+  // 1. Explicit provider key that is not an `{env:...}` placeholder.
   try {
     const { data } = await ctx.provider.get({ providerID })
     const configured = (data?.settings as Record<string, unknown> | undefined)?.apiKey
@@ -377,7 +380,7 @@ async function resolveApiKey(ctx: { provider: any; integration: any }): Promise<
     console.warn(`[sailing3d-model-sync] could not read provider settings: ${String(error)}`)
   }
 
-  // 3. Credential saved through /connect.
+  // 2. Credential saved through /connect.
   try {
     const connection = await ctx.integration.connection.active(integrationID)
     if (connection) {
@@ -406,12 +409,25 @@ async function registerIntegration(ctx: { integration: { transform: (callback: (
       integrationID,
       method: { type: "key", label: "Sailing3D API key" },
     })
-    // Environment entry: used automatically when the server has the variable.
-    editor.method.update({
-      integrationID,
-      method: { type: "env", names: [API_KEY_ENV] },
-    })
+    // 0.3.0 advertised an env method. Drop it so a leftover environment
+    // variable can never show up as a connection for this integration.
+    try {
+      editor.method.remove(integrationID, { type: "env", names: [LEGACY_API_KEY_ENV] })
+    } catch {
+      // Older builds may not expose method.remove, or nothing is left to remove.
+    }
   })
+}
+
+// Logging out has to be observable: the provider registry is only rebuilt from
+// the plugin on start/reload, so the last inventory must not be served from
+// cache after the credential is gone.
+async function clearCache(ctx: { storage: { remove: (key: string) => Promise<void> } }): Promise<void> {
+  try {
+    await ctx.storage.remove(cacheKey)
+  } catch (error) {
+    console.warn(`[sailing3d-model-sync] could not clear the cached inventory: ${String(error)}`)
+  }
 }
 
 export default Plugin.define({
@@ -438,10 +454,13 @@ export default Plugin.define({
     }
 
     const apiKey = await resolveApiKey(ctx)
-    if (!apiKey) {
-      console.warn(
-        `[sailing3d-model-sync] no API key available; run /connect for "${integrationName}" or set ${API_KEY_ENV} to enable discovery`,
-      )
+
+    const persist = async (inventory: SerializedModel[]) => {
+      try {
+        await ctx.storage.set(cacheKey, inventory as never)
+      } catch (error) {
+        console.warn(`[sailing3d-model-sync] could not persist inventory cache: ${String(error)}`)
+      }
     }
 
     const providerInfo = {
@@ -455,13 +474,19 @@ export default Plugin.define({
         // Keep the secret out of the provider registry and API responses. This
         // placeholder is not substituted for plugin-provided settings, so real
         // requests authenticate through the integration registered above.
-        apiKey: `{env:${API_KEY_ENV}}`,
+        apiKey: `{env:${LEGACY_API_KEY_ENV}}`,
       },
     }
 
     let models: SerializedModel[] = []
     let configuredOverrides = new Map<string, Record<string, unknown>>()
+    // Whether the provider belongs in the registry at all. It stays false while
+    // no credential is available, so logging out removes the provider instead of
+    // resurrecting the last cached inventory.
+    let enabled = false
+
     if (apiKey) {
+      enabled = true
       try {
         models = await discover({ apiKey, gatewayURL, catalogFile, catalogFallbackURL, catalogMaxAgeMs, timeoutMs, catalog: useCatalog, include, exclude })
       } catch (error) {
@@ -469,12 +494,14 @@ export default Plugin.define({
         const cached = await ctx.storage.get(cacheKey)
         if (Array.isArray(cached)) models = cached as SerializedModel[]
       }
-    } else {
-      const cached = await ctx.storage.get(cacheKey)
-      if (Array.isArray(cached)) models = cached as SerializedModel[]
     }
 
     await ctx.provider.transform((editor) => {
+      if (!enabled) {
+        // No credential: drop the provider instead of serving stale models.
+        if (editor.get("sailing3d")) editor.remove("sailing3d")
+        return
+      }
       const existing = editor.get("sailing3d")
       if (existing) {
         configuredOverrides = new Map(
@@ -493,17 +520,16 @@ export default Plugin.define({
         editor.add({ info: providerInfo, models })
       }
     })
-    console.info(`[sailing3d-model-sync] initialized with ${models.length} models`)
 
-    const persist = async (inventory: SerializedModel[]) => {
-      try {
-        await ctx.storage.set(cacheKey, inventory as never)
-      } catch (error) {
-        console.warn(`[sailing3d-model-sync] could not persist inventory cache: ${String(error)}`)
-      }
+    if (enabled) {
+      console.info(`[sailing3d-model-sync] initialized with ${models.length} models`)
+      if (models.length > 0) await persist(models)
+    } else {
+      await clearCache(ctx)
+      console.warn(
+        `[sailing3d-model-sync] no credential for "${integrationName}"; removed the provider and cached inventory. Run /connect for "${integrationName}" to enable discovery`,
+      )
     }
-
-    if (models.length > 0) await persist(models)
 
     let refreshing = false
     const refresh = async () => {
@@ -512,7 +538,11 @@ export default Plugin.define({
       try {
         const key = await resolveApiKey(ctx)
         if (!key) {
-          console.warn("[sailing3d-model-sync] refresh skipped; no API key available")
+          enabled = false
+          models = []
+          await clearCache(ctx)
+          await ctx.provider.reload()
+          console.warn("[sailing3d-model-sync] refresh found no credential; removed the provider and cached inventory")
           return
         }
         const latest = mergeConfiguredModels(
@@ -520,6 +550,7 @@ export default Plugin.define({
           configuredOverrides,
         )
         models = latest
+        enabled = true
         await ctx.provider.reload()
         await persist(latest)
         console.info(`[sailing3d-model-sync] refreshed ${latest.length} models`)

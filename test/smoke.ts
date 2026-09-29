@@ -63,12 +63,15 @@ const catalog = {
 type FakeState = {
   authHeader: string | undefined
   stored: unknown
+  storageRemovals: number
   replacedModels: Array<Record<string, any>>
   updatedProvider: Record<string, any> | undefined
   addedProviderID: string | undefined
+  removedProviders: string[]
   reloads: number
   integration: Record<string, any> | undefined
   integrationMethods: Array<Record<string, any>>
+  removedMethods: Array<{ integrationID: string; method: Record<string, any> }>
 }
 
 const originalFetch = globalThis.fetch
@@ -99,19 +102,60 @@ function createContext(options: {
   configuredApiKey?: string
   cached?: unknown
   emitRefreshed?: boolean
+  refreshedDelayMs?: number
   configuredOnly?: Record<string, Record<string, any>>
   failIntegrationRegistration?: boolean
 } = {}) {
   const state: FakeState = {
     authHeader: undefined,
     stored: undefined,
+    storageRemovals: 0,
     replacedModels: [],
     updatedProvider: undefined,
     addedProviderID: undefined,
+    removedProviders: [],
     reloads: 0,
     integration: undefined,
     integrationMethods: [],
+    removedMethods: [],
   }
+
+  const removedProviders = new Set<string>()
+  const transforms: Array<(editor: any) => void> = []
+
+  const makeEditor = () => ({
+    get: (providerID: string) =>
+      removedProviders.has(providerID)
+        ? undefined
+        : {
+            provider: { id: "sailing3d", settings: { customOption: true, apiKey: "{env:SAILING3D_API_KEY}" } },
+            models: new Map([[configuredModel.id, configuredModel], ...Object.entries(options.configuredOnly ?? {})]),
+          },
+    add: (input: { info: { id: string } }) => {
+      state.addedProviderID = input.info.id
+    },
+    update: (_id: string, mutate: (provider: any) => void) => {
+      const provider: Record<string, any> = {
+        name: "old name",
+        activation: "enabled",
+        package: "old",
+        settings: { customOption: true, apiKey: "{env:SAILING3D_API_KEY}" },
+      }
+      mutate(provider)
+      state.updatedProvider = provider
+    },
+    remove: (providerID: string) => {
+      removedProviders.add(providerID)
+      state.removedProviders.push(providerID)
+    },
+    models: {
+      set: (_id: string, models: Array<Record<string, any>>) => {
+        state.replacedModels = models
+      },
+      update: () => {},
+      remove: () => {},
+    },
+  })
 
   const configuredModel = {
     id: "deepseek-flash",
@@ -127,36 +171,13 @@ function createContext(options: {
     provider: {
       get: async () => ({ data: { settings: options.configuredApiKey ? { apiKey: options.configuredApiKey } : {} } }),
       transform: async (callback: (editor: any) => void) => {
-        callback({
-          get: () => ({
-            provider: { id: "sailing3d", settings: { customOption: true, apiKey: "{env:SAILING3D_API_KEY}" } },
-            models: new Map([[configuredModel.id, configuredModel], ...Object.entries(options.configuredOnly ?? {})]),
-          }),
-          add: (input: { info: { id: string } }) => {
-            state.addedProviderID = input.info.id
-          },
-          update: (_id: string, mutate: (provider: any) => void) => {
-            const provider: Record<string, any> = {
-              name: "old name",
-              activation: "enabled",
-              package: "old",
-              settings: { customOption: true, apiKey: "{env:SAILING3D_API_KEY}" },
-            }
-            mutate(provider)
-            state.updatedProvider = provider
-          },
-          remove: () => assert.fail("unexpected provider remove"),
-          models: {
-            set: (_id: string, models: Array<Record<string, any>>) => {
-              state.replacedModels = models
-            },
-            update: () => {},
-            remove: () => {},
-          },
-        })
+        transforms.push(callback)
+        callback(makeEditor())
       },
       reload: async () => {
         state.reloads++
+        // The real host re-applies every registered transform on reload.
+        for (const callback of transforms) callback(makeEditor())
       },
     },
     integration: {
@@ -176,7 +197,9 @@ function createContext(options: {
             update: (registration: Record<string, any>) => {
               state.integrationMethods.push(registration.method)
             },
-            remove: () => {},
+            remove: (integrationID: string, method: Record<string, any>) => {
+              state.removedMethods.push({ integrationID, method })
+            },
           },
         })
       },
@@ -189,7 +212,10 @@ function createContext(options: {
       subscribe: (opts?: { signal?: AbortSignal }) => {
         const signal = opts?.signal
         return (async function* () {
-          if (options.emitRefreshed) yield { type: "models-dev.refreshed" }
+          if (options.emitRefreshed) {
+            await new Promise((resolve) => setTimeout(resolve, options.refreshedDelayMs ?? 0))
+            yield { type: "models-dev.refreshed" }
+          }
           await new Promise<void>((resolve) => {
             if (!signal || signal.aborted) return resolve()
             signal.addEventListener("abort", () => resolve(), { once: true })
@@ -202,7 +228,9 @@ function createContext(options: {
       set: async (_key: string, value: unknown) => {
         state.stored = value
       },
-      remove: async () => {},
+      remove: async () => {
+        state.storageRemovals++
+      },
       scan: async () => ({ entries: [], next: undefined }),
     },
   } as any
@@ -210,12 +238,13 @@ function createContext(options: {
   return { context, state }
 }
 
-// 1. Environment variable is the primary credential.
+// 1. An explicit provider key wins over /connect, and SAILING3D_API_KEY in the
+//    process environment is ignored entirely.
 process.env.SAILING3D_API_KEY = "env-key"
 {
   const { context, state } = createContext({ connectKey: "connect-key", configuredApiKey: "literal-key" })
   const cleanup = await plugin.setup(context)
-  assert.equal(lastAuth, "Bearer env-key")
+  assert.equal(lastAuth, "Bearer literal-key")
   assert.equal(state.addedProviderID, undefined)
   assert.deepEqual(state.replacedModels.map(({ id }) => id), ids)
   assert.equal(state.updatedProvider?.integrationID, "sailing3d")
@@ -246,17 +275,17 @@ process.env.SAILING3D_API_KEY = "env-key"
   assert.equal(kimiK3.cost[0].cache.read, 0.05)
   assert.ok(state.stored)
   assert.equal(state.reloads, 0)
-  // The /connect integration must exist and declare its credential methods.
+  // Only the /connect key method is registered; the env method is not.
   assert.equal(state.integration?.id, "sailing3d")
   assert.equal(state.integration?.name, "Sailing3D Gateway")
-  assert.deepEqual(state.integrationMethods, [
-    { type: "key", label: "Sailing3D API key" },
-    { type: "env", names: ["SAILING3D_API_KEY"] },
+  assert.deepEqual(state.integrationMethods, [{ type: "key", label: "Sailing3D API key" }])
+  assert.deepEqual(state.removedMethods, [
+    { integrationID: "sailing3d", method: { type: "env", names: ["SAILING3D_API_KEY"] } },
   ])
   await cleanup?.()
 }
 
-// 2. Falls back to the /connect credential when the environment variable is absent.
+// 2. Falls back to the /connect credential when no explicit provider key exists.
 {
   delete process.env.SAILING3D_API_KEY
   const { context, state } = createContext({ connectKey: "connect-key" })
@@ -266,43 +295,38 @@ process.env.SAILING3D_API_KEY = "env-key"
   await cleanup?.()
 }
 
-// 3. Falls back to an explicit provider API key before /connect.
+// 3. Logging out removes the provider and drops the cached inventory; an
+//    environment variable alone is not a credential anymore.
 {
-  delete process.env.SAILING3D_API_KEY
-  const { context, state } = createContext({ connectKey: "connect-key", configuredApiKey: "literal-key" })
-  const cleanup = await plugin.setup(context)
-  assert.equal(lastAuth, "Bearer literal-key")
-  assert.deepEqual(state.replacedModels.map(({ id }) => id), ids)
-  await cleanup?.()
-}
-
-// 4. Without any credential it does not throw and reuses the cached inventory.
-{
-  delete process.env.SAILING3D_API_KEY
+  process.env.SAILING3D_API_KEY = "env-key"
   lastAuth = undefined
   const cached = [{ id: "from-cache", name: "From Cache", limit: { context: 1, output: 1 }, capabilities: { tools: true, input: ["text"], output: ["text"] } }]
   const { context, state } = createContext({ cached })
   const cleanup = await plugin.setup(context)
-  assert.equal(lastAuth, undefined)
-  assert.deepEqual(state.replacedModels.map(({ id }) => id), ["from-cache", "deepseek-flash"])
+  assert.equal(lastAuth, undefined, "an env var must not trigger discovery")
+  assert.deepEqual(state.removedProviders, ["sailing3d"])
+  assert.equal(state.storageRemovals, 1)
+  assert.equal(state.addedProviderID, undefined)
+  assert.equal(state.stored, undefined)
+  assert.deepEqual(state.replacedModels, [])
+  delete process.env.SAILING3D_API_KEY
   await cleanup?.()
 }
 
-// 5. Model filters and catalog opt-out options are honoured.
+// 4. Model filters and catalog opt-out options are honoured.
 {
-  process.env.SAILING3D_API_KEY = "env-key"
-  const { context, state } = createContext({ options: { includeModels: ["^glm-5"], catalog: false } })
+  const { context, state } = createContext({ options: { includeModels: ["^glm-5"], catalog: false }, connectKey: "connect-key" })
   const cleanup = await plugin.setup(context)
   assert.deepEqual(state.replacedModels.map(({ id }) => id), ["glm-5.3", "glm-5.3-flash", "deepseek-flash"])
   assert.equal(state.replacedModels[0].limit.context, 200_000)
   await cleanup?.()
 }
 
-// 6. A missing models.dev cache stays offline when catalogFallback is disabled.
+// 5. A missing models.dev cache stays offline when catalogFallback is disabled.
 {
-  process.env.SAILING3D_API_KEY = "env-key"
   const { context, state } = createContext({
     options: { catalogFile: join(catalogDir, "missing.json"), catalogFallback: false },
+    connectKey: "connect-key",
   })
   const cleanup = await plugin.setup(context)
   assert.deepEqual(state.replacedModels.map(({ id }) => id), ids)
@@ -312,26 +336,24 @@ process.env.SAILING3D_API_KEY = "env-key"
   await cleanup?.()
 }
 
-// 7. A models-dev.refreshed event triggers an immediate refresh.
+// 6. A models-dev.refreshed event triggers an immediate refresh.
 {
-  process.env.SAILING3D_API_KEY = "env-key"
-  const { context, state } = createContext({ emitRefreshed: true })
+  const { context, state } = createContext({ emitRefreshed: true, connectKey: "connect-key" })
   const cleanup = await plugin.setup(context)
   await new Promise((resolve) => setTimeout(resolve, 50))
   assert.ok(state.reloads >= 1, "expected a provider reload after models-dev.refreshed")
   await cleanup?.()
 }
 
-// 8. Config-only models are preserved when discovery does not return them.
+// 7. Config-only models are preserved when discovery does not return them.
 {
-  process.env.SAILING3D_API_KEY = "env-key"
   const retired = {
     id: "retired-model",
     name: "Retired Model",
     limit: { context: 4096, output: 1024 },
     capabilities: { tools: false, input: ["text"], output: ["text"] },
   }
-  const { context, state } = createContext({ configuredOnly: { "retired-model": retired } })
+  const { context, state } = createContext({ configuredOnly: { "retired-model": retired }, connectKey: "connect-key" })
   const cleanup = await plugin.setup(context)
   const kept = state.replacedModels.find(({ id }) => id === "retired-model")
   assert.ok(kept, "expected the config-only model to be preserved")
@@ -341,12 +363,12 @@ process.env.SAILING3D_API_KEY = "env-key"
   await cleanup?.()
 }
 
-// 9. catalogFallback is on by default and fetches models.dev when the cache is missing.
+// 8. catalogFallback is on by default and fetches models.dev when the cache is missing.
 {
-  process.env.SAILING3D_API_KEY = "env-key"
   const before = remoteCatalogFetches
   const { context, state } = createContext({
     options: { catalogFile: join(catalogDir, "missing-fallback.json") },
+    connectKey: "connect-key",
   })
   const cleanup = await plugin.setup(context)
   assert.equal(remoteCatalogFetches, before + 1)
@@ -356,14 +378,47 @@ process.env.SAILING3D_API_KEY = "env-key"
   await cleanup?.()
 }
 
-// 10. A failing integration registration never breaks discovery.
+// 9. A failing integration registration never breaks discovery.
 {
-  process.env.SAILING3D_API_KEY = "env-key"
-  const { context, state } = createContext({ failIntegrationRegistration: true })
+  const { context, state } = createContext({ connectKey: "connect-key", failIntegrationRegistration: true })
   const cleanup = await plugin.setup(context)
-  assert.equal(lastAuth, "Bearer env-key")
+  assert.equal(lastAuth, "Bearer connect-key")
   assert.deepEqual(state.replacedModels.map(({ id }) => id), ids)
   assert.equal(state.integration, undefined)
+  await cleanup?.()
+}
+
+// 10. A refresh that finds no credential tears the provider down again.
+{
+  const options = { connectKey: "connect-key" as string | undefined, emitRefreshed: true, refreshedDelayMs: 30 }
+  const { context, state } = createContext(options)
+  const cleanup = await plugin.setup(context)
+  assert.deepEqual(state.replacedModels.map(({ id }) => id), ids)
+  assert.deepEqual(state.removedProviders, [])
+  // Log out while the plugin is still running.
+  options.connectKey = undefined
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  assert.deepEqual(state.removedProviders, ["sailing3d"])
+  assert.ok(state.reloads >= 1, "expected a provider reload after the credential disappeared")
+  assert.ok(state.storageRemovals >= 1, "expected the cached inventory to be cleared")
+  await cleanup?.()
+}
+
+// 11. Discovery failures with a live credential still fall back to the cache.
+{
+  const cached = [
+    { id: "from-cache", name: "From Cache", limit: { context: 1, output: 1 }, capabilities: { tools: true, input: ["text"], output: ["text"] } },
+  ]
+  const { context, state } = createContext({ connectKey: "connect-key", cached, options: { catalog: false } })
+  const failing = globalThis.fetch
+  globalThis.fetch = async (input) => {
+    if (String(input).includes("/v1/models")) throw new Error("network down")
+    return failing(input)
+  }
+  const cleanup = await plugin.setup(context)
+  globalThis.fetch = failing
+  assert.deepEqual(state.replacedModels.map(({ id }) => id), ["from-cache", "deepseek-flash"])
+  assert.deepEqual(state.removedProviders, [])
   await cleanup?.()
 }
 
@@ -372,7 +427,7 @@ await rm(catalogDir, { recursive: true, force: true })
 console.log(
   JSON.stringify({
     provider: "sailing3d",
-    scenarios: 10,
+    scenarios: 11,
     modelCount: ids.length,
   }),
 )
