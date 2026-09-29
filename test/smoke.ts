@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import plugin from "../index.ts"
+import tuiPlugin from "../tui.ts"
 
 const ids = [
   "deepseek-flash",
@@ -484,13 +485,64 @@ process.env.SAILING3D_API_KEY = "env-key"
   assert.equal(state.synthetic[0].resume, false)
   await cleanup?.()
 }
+// 14. The TUI companion turns the refresh summary into a toast, and only that.
+{
+  let handler: ((event: any) => void) | undefined
+  const toasts: Array<Record<string, any>> = []
+  const cleanup = await tuiPlugin.setup({
+    data: {
+      on: (type: string, next: (event: any) => void) => {
+        assert.equal(type, "session.inbox.enqueued")
+        handler = next
+        return () => {
+          handler = undefined
+        }
+      },
+    },
+    ui: { toast: { show: (options: Record<string, any>) => toasts.push(options) } },
+  } as any)
+  assert.ok(handler, "expected the TUI plugin to subscribe")
+
+  const enqueue = (item: Record<string, any>) => handler!({ data: { sessionID: "ses_test", inboxID: "inbox_1", item } })
+
+  // Unrelated inbox traffic never toasts.
+  enqueue({ type: "user", payload: { text: "hello" } })
+  enqueue({ type: "synthetic", payload: { text: "The server restarted", description: "Continuing after restart" } })
+  enqueue({ type: "synthetic", payload: { text: "[sailing3d-model-sync] quiet", description: "something else" } })
+  assert.equal(toasts.length, 0, "only our own summaries may toast")
+
+  enqueue({
+    type: "synthetic",
+    payload: { text: "[sailing3d-model-sync] refreshed 8 models from https://ai-api.sailing3d.cn/v1/models in 1.4s", description: "Sailing3D model sync" },
+  })
+  assert.equal(toasts.length, 1)
+  assert.equal(toasts[0].variant, "success")
+  assert.equal(toasts[0].title, "Sailing3D model sync")
+  assert.match(toasts[0].message, /^refreshed 8 models from https:\/\/ai-api\.sailing3d\.cn\/v1\/models/)
+  assert.ok(!toasts[0].message.includes("[sailing3d-model-sync]"), "the prefix belongs to the transcript line")
+
+  enqueue({
+    type: "synthetic",
+    payload: { text: "[sailing3d-model-sync] refresh failed (HTTP 500); kept the previous 8 models (after 1.2s)", description: "Sailing3D model sync" },
+  })
+  assert.equal(toasts[1].variant, "error")
+
+  enqueue({
+    type: "synthetic",
+    payload: { text: "[sailing3d-model-sync] no credential for Sailing3D Gateway; removed the provider and cleared the cached inventory", description: "Sailing3D model sync" },
+  })
+  assert.equal(toasts[2].variant, "warning")
+
+  await cleanup?.()
+  assert.equal(handler, undefined, "cleanup must unsubscribe")
+}
 
 globalThis.fetch = originalFetch
 await rm(catalogDir, { recursive: true, force: true })
 console.log(
   JSON.stringify({
     provider: "sailing3d",
-    scenarios: 13,
+    scenarios: 14,
     modelCount: ids.length,
   }),
 )

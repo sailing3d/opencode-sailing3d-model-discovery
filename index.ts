@@ -549,6 +549,8 @@ export default Plugin.define({
         return "another refresh is already running; queued a follow-up"
       }
       refreshing = true
+      const started = Date.now()
+      const elapsed = () => `${((Date.now() - started) / 1000).toFixed(1)}s`
       try {
         const key = await resolveApiKey(ctx)
         if (!key) {
@@ -569,11 +571,11 @@ export default Plugin.define({
         await ctx.provider.reload()
         await persist(latest)
         console.info(`[sailing3d-model-sync] refreshed ${latest.length} models`)
-        return `refreshed ${latest.length} models from ${gatewayURL}`
+        return `refreshed ${latest.length} models from ${gatewayURL} in ${elapsed()}`
       } catch (error) {
         const detail = String(error)
         console.warn(`[sailing3d-model-sync] refresh failed; retaining last successful inventory: ${detail}`)
-        return `refresh failed (${detail}); kept the previous ${models.length} models`
+        return `refresh failed (${detail}); kept the previous ${models.length} models (after ${elapsed()})`
       } finally {
         refreshing = false
         if (pending) {

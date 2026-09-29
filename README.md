@@ -47,14 +47,29 @@ opencode reload
 /sailing3d-refresh
 ```
 
-它立即重新请求网关的 `/v1/models`、重新发布 `sailing3d` provider，然后在会话里回一行结果：
+它立即重新请求网关的 `/v1/models`、重新发布 `sailing3d` provider（约 1–3 秒），然后给两种反馈：
+
+**1. 右上角弹一个 toast**（来自 `tui.ts`，TUI 侧插件），带计时与成功/警告/错误三种状态：
+
+**2. 会话里留一行结果**（服务端写的 synthetic 消息，重开 TUI 也能看到）：
 
 ```
-[sailing3d-model-sync] refreshed 8 models from https://ai-api.sailing3d.cn/v1/models
+[sailing3d-model-sync] refreshed 8 models from https://ai-api.sailing3d.cn/v1/models in 1.4s
 ```
 
-- 凭据已失效时它同样执行清理，回一行 `no credential for Sailing3D Gateway; removed the provider…`。
-- 发现请求失败时保留上一次的清单，并回 `refresh failed (…); kept the previous N models`。
+三种结局对应三种措辞与 toast 颜色：
+
+| 结果 | 会话里那行 | toast |
+| --- | --- | --- |
+| 成功 | `refreshed N models from … in Xs` | success（绿） |
+| 凭据已失效 | `no credential for Sailing3D Gateway; removed the provider…` | warning（黄） |
+| 网关请求失败 | `refresh failed (…); kept the previous N models` | error（红） |
+
+反馈渠道说明：插件**没有**别的输出通道——`EventDomain` 只有 `subscribe`（发不了 toast 事件），
+`CommandDefinition.execute` 的返回类型是 `Promise<void>`。所以服务端只能把结果写成会话里的
+synthetic 消息，再由 TUI 侧插件把它升级成 toast。若 TUI 插件没被加载（例如更老的 OpenCode），
+你仍会看到会话里那一行，只是不会弹 toast。
+
 - 它只跑一次发现，**不重新加载插件**，所以比 `opencode reload` / 重启 App 轻得多。
 
 等价但更重的命令行方式是 `opencode reload`：它会重新执行所有插件的 `setup`（其中包含一次发现）。
@@ -195,6 +210,7 @@ provider 优先级，并在记录冲突时告警。缺少元数据时使用 Open
 | `auth list` 里出现以 `environment` 结尾的 Sailing3D 行 | 要么插件还是 0.3（`opencode plugin update`），要么配置里仍写着 `providers.sailing3d.env`——0.4 已不参与模型发现，建议删掉 |
 | 改了配置没生效 | 只改配置 → `opencode reload`；改了插件 → `opencode plugin update` |
 | 想立刻重新拉取模型清单 | TUI 里跑 `/sailing3d-refresh`（只做一次发现，不重载插件） |
+| 跑了 `/sailing3d-refresh` 却没有 toast | 先看会话里有没有 `[sailing3d-model-sync] …` 那行——有就说明刷新执行了，只是 `tui.ts` 没被加载（见「开发校验」的两个入口与 `solid-js` 约束） |
 | 上下文长度 / 价格是默认值 | `~/.cache/opencode/models.json` 的 mtime 超过 24 小时即过期，`catalogFallback`（默认开启）会请求 models.dev；离线时设 `catalogFallback: false` 并接受默认值 |
 | 某个模型调用报 `model id does not exist` | 网关自身不一致：`/v1/models` 给出 `kimi-k3-256k`，聊天接口却要求 `k3`。插件原样透传 ID、不做猜测，属网关侧问题 |
 
@@ -205,6 +221,17 @@ npm ci
 npm run check
 npm test
 ```
+
+仓库有两个入口，分别被 OpenCode 加载到不同进程：
+
+| 文件 | 加载到 | 职责 |
+| --- | --- | --- |
+| `index.ts`（`exports["."]`） | OpenCode server | 网关发现、provider 注册、凭据事件、`/sailing3d-refresh` |
+| `tui.ts`（`exports["./tui"]`） | TUI | 把刷新结果升级成右上角 toast |
+
+**`tui.ts` 只能用 `import type` 引用 `@opencode/plugin/tui`**：值导入会连带加载 `solid-js`
+（可选 peer，插件安装目录里没有），整个 TUI 模块会加载失败、toast 就静默失效。
+`Plugin.define` 本身就是恒等函数，导出普通对象等价。
 
 冒烟测试使用固定 fixture，不会请求网关。插件只从 OpenCode 凭据存储或显式 provider 配置读取
 凭据，从不打印或持久化它。
