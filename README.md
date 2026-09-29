@@ -196,5 +196,6 @@ opencode reload
 ```
 
 改完代码用 `opencode reload` 重载即可（OpenCode 会监测插件文件变更并重新加载模块）；依赖或版本
-有变动时再跑一次 `opencode plugin update "git+file:///…"` 重新安装。用 `opencode plugin list`
-可以确认生效的版本（当前为 0.4.x）。
+有变动时再跑一次 `opencode plugin update "git+file:///…"` 重新安装。`opencode plugin list` 可以确认
+生效的来源——注意它的 `VERSION` 列显示的是**已安装的 git 提交**（例如 `9c64cad`），包的语义版本
+（当前 0.4.x）写在 `package.json` 里。
