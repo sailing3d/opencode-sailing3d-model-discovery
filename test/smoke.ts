@@ -67,6 +67,8 @@ type FakeState = {
   updatedProvider: Record<string, any> | undefined
   addedProviderID: string | undefined
   reloads: number
+  integration: Record<string, any> | undefined
+  integrationMethods: Array<Record<string, any>>
 }
 
 const originalFetch = globalThis.fetch
@@ -98,6 +100,7 @@ function createContext(options: {
   cached?: unknown
   emitRefreshed?: boolean
   configuredOnly?: Record<string, Record<string, any>>
+  failIntegrationRegistration?: boolean
 } = {}) {
   const state: FakeState = {
     authHeader: undefined,
@@ -106,6 +109,8 @@ function createContext(options: {
     updatedProvider: undefined,
     addedProviderID: undefined,
     reloads: 0,
+    integration: undefined,
+    integrationMethods: [],
   }
 
   const configuredModel = {
@@ -155,6 +160,26 @@ function createContext(options: {
       },
     },
     integration: {
+      transform: async (callback: (editor: any) => void) => {
+        if (options.failIntegrationRegistration) throw new Error("integration transform unavailable")
+        callback({
+          list: () => [],
+          get: () => undefined,
+          update: (id: string, mutate: (integration: Record<string, any>) => void) => {
+            const integration: Record<string, any> = { id, name: undefined }
+            mutate(integration)
+            state.integration = integration
+          },
+          remove: () => assert.fail("unexpected integration remove"),
+          method: {
+            list: () => [],
+            update: (registration: Record<string, any>) => {
+              state.integrationMethods.push(registration.method)
+            },
+            remove: () => {},
+          },
+        })
+      },
       connection: {
         active: async () => (options.connectKey ? { type: "credential", id: "cred_test", label: "Sailing3D Gateway", method: "key" } : undefined),
         resolve: async () => (options.connectKey ? { type: "key", key: options.connectKey } : undefined),
@@ -221,6 +246,13 @@ process.env.SAILING3D_API_KEY = "env-key"
   assert.equal(kimiK3.cost[0].cache.read, 0.05)
   assert.ok(state.stored)
   assert.equal(state.reloads, 0)
+  // The /connect integration must exist and declare its credential methods.
+  assert.equal(state.integration?.id, "sailing3d")
+  assert.equal(state.integration?.name, "Sailing3D Gateway")
+  assert.deepEqual(state.integrationMethods, [
+    { type: "key", label: "Sailing3D API key" },
+    { type: "env", names: ["SAILING3D_API_KEY"] },
+  ])
   await cleanup?.()
 }
 
@@ -324,12 +356,23 @@ process.env.SAILING3D_API_KEY = "env-key"
   await cleanup?.()
 }
 
+// 10. A failing integration registration never breaks discovery.
+{
+  process.env.SAILING3D_API_KEY = "env-key"
+  const { context, state } = createContext({ failIntegrationRegistration: true })
+  const cleanup = await plugin.setup(context)
+  assert.equal(lastAuth, "Bearer env-key")
+  assert.deepEqual(state.replacedModels.map(({ id }) => id), ids)
+  assert.equal(state.integration, undefined)
+  await cleanup?.()
+}
+
 globalThis.fetch = originalFetch
 await rm(catalogDir, { recursive: true, force: true })
 console.log(
   JSON.stringify({
     provider: "sailing3d",
-    scenarios: 9,
+    scenarios: 10,
     modelCount: ids.length,
   }),
 )

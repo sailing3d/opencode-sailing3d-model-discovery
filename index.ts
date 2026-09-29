@@ -4,9 +4,12 @@ import { join } from "node:path"
 import { Model, Plugin, Provider } from "@opencode/plugin"
 
 const providerID = Provider.ID.make("sailing3d")
-// The provider integration used by /connect. It already exists for the provider
-// id, but binding it explicitly keeps the credential flow stable.
+// Provider integrations are referenced by id, never created implicitly: a plugin
+// must register the integration and its credential methods itself, otherwise
+// /connect and `opencode auth login` report "Integration not found".
 const integrationID = "sailing3d"
+const integrationName = "Sailing3D Gateway"
+const API_KEY_ENV = "SAILING3D_API_KEY"
 const cacheKey = "sailing3d-model-inventory-v1"
 
 const DEFAULT_BASE_URL = "https://ai-api.sailing3d.cn/v1"
@@ -362,7 +365,7 @@ async function discover(input: {
 
 async function resolveApiKey(ctx: { provider: any; integration: any }): Promise<string | undefined> {
   // 1. Environment variable (primary).
-  const fromEnv = process.env.SAILING3D_API_KEY
+  const fromEnv = process.env[API_KEY_ENV]
   if (fromEnv) return fromEnv
 
   // 2. Explicit provider key that is not an `{env:...}` placeholder.
@@ -389,6 +392,28 @@ async function resolveApiKey(ctx: { provider: any; integration: any }): Promise<
   return undefined
 }
 
+// OpenCode resolves a provider's credentials through the integration named by
+// its `integrationID`, but binding that id only creates a reference. The
+// integration and its methods have to be registered by a plugin, and it is
+// runtime-scoped, so it is re-registered on every start.
+async function registerIntegration(ctx: { integration: { transform: (callback: (editor: any) => void) => Promise<unknown> } }): Promise<void> {
+  await ctx.integration.transform((editor: any) => {
+    editor.update(integrationID, (integration: any) => {
+      integration.name = integrationName
+    })
+    // Interactive `/connect` entry: pastes a key that OpenCode stores for us.
+    editor.method.update({
+      integrationID,
+      method: { type: "key", label: "Sailing3D API key" },
+    })
+    // Environment entry: used automatically when the server has the variable.
+    editor.method.update({
+      integrationID,
+      method: { type: "env", names: [API_KEY_ENV] },
+    })
+  })
+}
+
 export default Plugin.define({
   id: "sailing3d-model-sync",
   async setup(ctx) {
@@ -406,23 +431,31 @@ export default Plugin.define({
     const include = compileFilters(options.includeModels)
     const exclude = compileFilters(options.excludeModels)
 
+    try {
+      await registerIntegration(ctx)
+    } catch (error) {
+      console.warn(`[sailing3d-model-sync] could not register the ${integrationName} integration: ${String(error)}`)
+    }
+
     const apiKey = await resolveApiKey(ctx)
     if (!apiKey) {
       console.warn(
-        `[sailing3d-model-sync] no API key available; run /connect for "Sailing3D Gateway" or set SAILING3D_API_KEY to enable discovery`,
+        `[sailing3d-model-sync] no API key available; run /connect for "${integrationName}" or set ${API_KEY_ENV} to enable discovery`,
       )
     }
 
     const providerInfo = {
       ...Provider.Info.empty(providerID),
-      name: "Sailing3D Gateway",
+      name: integrationName,
       activation: "enabled" as const,
       package: "@opencode/ai/providers/openai-compatible",
       integrationID: integrationID as never,
       settings: {
         baseURL,
-        // Keep the secret out of the provider registry and API responses.
-        apiKey: "{env:SAILING3D_API_KEY}",
+        // Keep the secret out of the provider registry and API responses. This
+        // placeholder is not substituted for plugin-provided settings, so real
+        // requests authenticate through the integration registered above.
+        apiKey: `{env:${API_KEY_ENV}}`,
       },
     }
 

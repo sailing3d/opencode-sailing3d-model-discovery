@@ -29,9 +29,30 @@ opencode plugin list
 
 都取不到时插件不会失败：会沿用缓存里上一次成功的模型清单，并提示如何连接。
 
-插件用 `@opencode/ai/providers/openai-compatible` 注册 `sailing3d` provider，并把它的
-`integrationID` 绑定到 `sailing3d`，因此由 `/connect` 管理保存的账号。密钥不会写入配置；
-provider 设置里保留 `{env:SAILING3D_API_KEY}` 占位符。
+### `/connect` 与 integration 注册
+
+插件用 `@opencode/ai/providers/openai-compatible` 注册 `sailing3d` provider。OpenCode 只按
+provider 的 `integrationID` **引用**凭据来源，integration 本身不会自动存在，所以插件在启动时用
+`ctx.integration.transform` 注册 `sailing3d`（显示名 **Sailing3D Gateway**），并声明两种方法：
+
+- `key`：在 TUI 里 `/connect` → 选择 **Sailing3D Gateway** 并粘贴密钥；也可用
+  `opencode auth login sailing3d --method key`。凭据由 OpenCode 存进凭据库（SQLite），不写进配置。
+- `env`：服务器进程存在 `SAILING3D_API_KEY` 时自动成为一个可用连接，不需要 `/connect`。
+
+注册是运行期行为，每次启动重新注册，不会改写配置文件。
+
+provider 设置里保留 `{env:SAILING3D_API_KEY}` 占位符，避免密钥进入 provider 注册表。注意
+OpenCode 不会对插件注入的 provider 设置做 `{env:...}` 替换，请求的实际认证来自上面的
+integration。若不想使用 `/connect`，也可以在配置里显式声明：
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "providers": {
+    "sailing3d": { "env": ["SAILING3D_API_KEY"] }
+  }
+}
+```
 
 ## 工作原理
 
