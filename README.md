@@ -32,8 +32,8 @@ opencode plugin list
 `env` 方法，因此 `opencode auth list` 里不会再出现这一行。
 
 两者都取不到时，插件不会再用旧清单兜底，而是**删除 `sailing3d` provider 并清空缓存的模型清单**，
-模型选择器里的 Sailing3D 模型随之消失。之后用 `/connect` 连上（或写显式 `apiKey`）并运行
-`opencode reload` 即可恢复。
+模型选择器里的 Sailing3D 模型随之消失。之后用 `/connect` 连上（或写显式 `apiKey`）即可恢复，
+不需要重启：插件监听凭据变更事件并立即重新发现。
 
 ### `/connect` 与 integration 注册
 
@@ -65,8 +65,13 @@ provider 设置里保留 `{env:SAILING3D_API_KEY}` 占位符：OpenCode 不会�
 
 启动时插件请求网关的模型列表，并读取 OpenCode 缓存的 models.dev 快照
 （`~/.cache/opencode/models.json`；兼容 `$XDG_CACHE_HOME` 与 `%USERPROFILE%`），然后合并进
-`sailing3d` provider。它每 6 小时刷新一次，并在每次刷新以及 OpenCode 发布
-`models-dev.refreshed` 事件后立即重读缓存。
+`sailing3d` provider。它每 6 小时刷新一次，并在这几类事件后立即刷新：`models-dev.refreshed`
+（重读缓存）、`credential.updated` / `credential.switched` / `integration.updated`。
+
+最后这组凭据事件很关键：OpenCode 不会因为新连接而重新执行插件 `setup`，也不会像内置 provider
+那样把插件发现的模型按凭据可用性自动挂载/卸载。所以 `/connect` 一个 Sailing3D key 之后，是这些
+事件触发 `refresh()`，模型才会立即出现（而不是等到下次启动或 6 小时后）；注销时同理，会立即摘掉
+provider 与模型。
 
 「上一次成功的清单」只在**凭据仍然可用、但某次发现请求失败**时作为兜底。凭据本身消失时
 （注销 `/connect` 且没有显式 `apiKey`），插件会在启动、`opencode reload` 或下一次刷新时

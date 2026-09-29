@@ -17,6 +17,14 @@ const integrationName = "Sailing3D Gateway"
 const LEGACY_API_KEY_ENV = "SAILING3D_API_KEY"
 const cacheKey = "sailing3d-model-inventory-v1"
 
+// OpenCode does not re-run plugin setup when a credential is added or removed,
+// and it does not gate plugin-discovered models on credential availability the
+// way it does for its built-in providers. Without reacting to these events a
+// `/connect` (or a logout) would only take effect on the next start/reload or
+// the periodic refresh. `credential.updated` carries no integration id, so every
+// credential change re-checks the gateway.
+const REFRESH_EVENTS = new Set(["credential.updated", "credential.switched", "integration.updated", "models-dev.refreshed"])
+
 const DEFAULT_BASE_URL = "https://ai-api.sailing3d.cn/v1"
 const DEFAULT_REFRESH_MS = 6 * 60 * 60 * 1000
 const DEFAULT_TIMEOUT_MS = 15_000
@@ -532,8 +540,12 @@ export default Plugin.define({
     }
 
     let refreshing = false
+    let pending = false
     const refresh = async () => {
-      if (refreshing) return
+      if (refreshing) {
+        pending = true
+        return
+      }
       refreshing = true
       try {
         const key = await resolveApiKey(ctx)
@@ -558,28 +570,42 @@ export default Plugin.define({
         console.warn(`[sailing3d-model-sync] refresh failed; retaining last successful inventory: ${String(error)}`)
       } finally {
         refreshing = false
+        if (pending) {
+          pending = false
+          void refresh()
+        }
       }
     }
 
     const timer = setInterval(() => void refresh(), refreshMs)
-    // Re-read the models.dev cache as soon as OpenCode refreshes it instead of
-    // waiting for the next scheduled interval.
-    const controller = new AbortController()
-    if (useCatalog) {
-      void (async () => {
-        try {
-          for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-            if (event.type === "models-dev.refreshed") void refresh()
-          }
-        } catch (error) {
-          if (!controller.signal.aborted) {
-            console.warn(`[sailing3d-model-sync] models.dev refresh subscription stopped: ${String(error)}`)
-          }
-        }
-      })()
+    // Coalesce bursts (a /connect emits several credential events) and re-read
+    // the models.dev cache as soon as OpenCode refreshes it instead of waiting
+    // for the next scheduled interval.
+    let debounce: ReturnType<typeof setTimeout> | undefined
+    const scheduleRefresh = () => {
+      if (debounce) return
+      debounce = setTimeout(() => {
+        debounce = undefined
+        void refresh()
+      }, 250)
     }
+    const controller = new AbortController()
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          if (!REFRESH_EVENTS.has(event.type)) continue
+          if (event.type === "models-dev.refreshed" && !useCatalog) continue
+          scheduleRefresh()
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.warn(`[sailing3d-model-sync] event subscription stopped: ${String(error)}`)
+        }
+      }
+    })()
     return () => {
       clearInterval(timer)
+      if (debounce) clearTimeout(debounce)
       controller.abort()
     }
   },

@@ -65,6 +65,7 @@ type FakeState = {
   stored: unknown
   storageRemovals: number
   replacedModels: Array<Record<string, any>>
+  addedModels: Array<Record<string, any>>
   updatedProvider: Record<string, any> | undefined
   addedProviderID: string | undefined
   removedProviders: string[]
@@ -101,8 +102,8 @@ function createContext(options: {
   connectKey?: string
   configuredApiKey?: string
   cached?: unknown
-  emitRefreshed?: boolean
-  refreshedDelayMs?: number
+  emitEvents?: string[]
+  eventDelayMs?: number
   configuredOnly?: Record<string, Record<string, any>>
   failIntegrationRegistration?: boolean
 } = {}) {
@@ -111,6 +112,7 @@ function createContext(options: {
     stored: undefined,
     storageRemovals: 0,
     replacedModels: [],
+    addedModels: [],
     updatedProvider: undefined,
     addedProviderID: undefined,
     removedProviders: [],
@@ -131,8 +133,9 @@ function createContext(options: {
             provider: { id: "sailing3d", settings: { customOption: true, apiKey: "{env:SAILING3D_API_KEY}" } },
             models: new Map([[configuredModel.id, configuredModel], ...Object.entries(options.configuredOnly ?? {})]),
           },
-    add: (input: { info: { id: string } }) => {
+    add: (input: { info: { id: string }; models: Array<Record<string, any>> }) => {
       state.addedProviderID = input.info.id
+      state.addedModels = input.models
     },
     update: (_id: string, mutate: (provider: any) => void) => {
       const provider: Record<string, any> = {
@@ -212,9 +215,9 @@ function createContext(options: {
       subscribe: (opts?: { signal?: AbortSignal }) => {
         const signal = opts?.signal
         return (async function* () {
-          if (options.emitRefreshed) {
-            await new Promise((resolve) => setTimeout(resolve, options.refreshedDelayMs ?? 0))
-            yield { type: "models-dev.refreshed" }
+          for (const type of options.emitEvents ?? []) {
+            await new Promise((resolve) => setTimeout(resolve, options.eventDelayMs ?? 0))
+            yield { type }
           }
           await new Promise<void>((resolve) => {
             if (!signal || signal.aborted) return resolve()
@@ -338,9 +341,9 @@ process.env.SAILING3D_API_KEY = "env-key"
 
 // 6. A models-dev.refreshed event triggers an immediate refresh.
 {
-  const { context, state } = createContext({ emitRefreshed: true, connectKey: "connect-key" })
+  const { context, state } = createContext({ emitEvents: ["models-dev.refreshed"], connectKey: "connect-key" })
   const cleanup = await plugin.setup(context)
-  await new Promise((resolve) => setTimeout(resolve, 50))
+  await new Promise((resolve) => setTimeout(resolve, 500))
   assert.ok(state.reloads >= 1, "expected a provider reload after models-dev.refreshed")
   await cleanup?.()
 }
@@ -390,14 +393,14 @@ process.env.SAILING3D_API_KEY = "env-key"
 
 // 10. A refresh that finds no credential tears the provider down again.
 {
-  const options = { connectKey: "connect-key" as string | undefined, emitRefreshed: true, refreshedDelayMs: 30 }
+  const options = { connectKey: "connect-key" as string | undefined, emitEvents: ["credential.updated"], eventDelayMs: 30 }
   const { context, state } = createContext(options)
   const cleanup = await plugin.setup(context)
   assert.deepEqual(state.replacedModels.map(({ id }) => id), ids)
   assert.deepEqual(state.removedProviders, [])
   // Log out while the plugin is still running.
   options.connectKey = undefined
-  await new Promise((resolve) => setTimeout(resolve, 150))
+  await new Promise((resolve) => setTimeout(resolve, 500))
   assert.deepEqual(state.removedProviders, ["sailing3d"])
   assert.ok(state.reloads >= 1, "expected a provider reload after the credential disappeared")
   assert.ok(state.storageRemovals >= 1, "expected the cached inventory to be cleared")
@@ -422,12 +425,32 @@ process.env.SAILING3D_API_KEY = "env-key"
   await cleanup?.()
 }
 
+// 12. Connecting while the plugin runs (/connect -> credential.updated) exposes
+//     models without a restart, matching the built-in providers.
+{
+  const options = { connectKey: undefined as string | undefined, emitEvents: ["credential.updated"], eventDelayMs: 30 }
+  const { context, state } = createContext(options)
+  const cleanup = await plugin.setup(context)
+  // No credential yet: provider absent.
+  assert.deepEqual(state.removedProviders, ["sailing3d"])
+  assert.deepEqual(state.replacedModels, [])
+  assert.equal(state.addedProviderID, undefined)
+  // The user pastes a key through /connect.
+  options.connectKey = "connect-key"
+  await new Promise((resolve) => setTimeout(resolve, 600))
+  assert.equal(state.addedProviderID, "sailing3d")
+  assert.deepEqual(state.addedModels.map(({ id }) => id), ids)
+  assert.ok(state.stored, "expected the inventory to be persisted after connecting")
+  assert.ok(state.reloads >= 1, "expected a provider reload after connecting")
+  await cleanup?.()
+}
+
 globalThis.fetch = originalFetch
 await rm(catalogDir, { recursive: true, force: true })
 console.log(
   JSON.stringify({
     provider: "sailing3d",
-    scenarios: 11,
+    scenarios: 12,
     modelCount: ids.length,
   }),
 )
