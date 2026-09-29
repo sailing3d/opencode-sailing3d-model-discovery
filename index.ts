@@ -541,10 +541,12 @@ export default Plugin.define({
 
     let refreshing = false
     let pending = false
-    const refresh = async () => {
+    // Returns a one-line summary so both the event path and the manual
+    // `/sailing3d-refresh` command can report what happened.
+    const refresh = async (): Promise<string> => {
       if (refreshing) {
         pending = true
-        return
+        return "another refresh is already running; queued a follow-up"
       }
       refreshing = true
       try {
@@ -554,8 +556,9 @@ export default Plugin.define({
           models = []
           await clearCache(ctx)
           await ctx.provider.reload()
-          console.warn("[sailing3d-model-sync] refresh found no credential; removed the provider and cached inventory")
-          return
+          const message = `no credential for ${integrationName}; removed the provider and cleared the cached inventory`
+          console.warn(`[sailing3d-model-sync] ${message}`)
+          return message
         }
         const latest = mergeConfiguredModels(
           await discover({ apiKey: key, gatewayURL, catalogFile, catalogFallbackURL, catalogMaxAgeMs, timeoutMs, catalog: useCatalog, include, exclude }),
@@ -566,8 +569,11 @@ export default Plugin.define({
         await ctx.provider.reload()
         await persist(latest)
         console.info(`[sailing3d-model-sync] refreshed ${latest.length} models`)
+        return `refreshed ${latest.length} models from ${gatewayURL}`
       } catch (error) {
-        console.warn(`[sailing3d-model-sync] refresh failed; retaining last successful inventory: ${String(error)}`)
+        const detail = String(error)
+        console.warn(`[sailing3d-model-sync] refresh failed; retaining last successful inventory: ${detail}`)
+        return `refresh failed (${detail}); kept the previous ${models.length} models`
       } finally {
         refreshing = false
         if (pending) {
@@ -575,6 +581,32 @@ export default Plugin.define({
           void refresh()
         }
       }
+    }
+
+    // Manual entry point for when the automatic triggers are not enough
+    // (a gateway-side rename, a fix that needs an immediate re-check, ...).
+    try {
+      await ctx.command.transform((editor) => {
+        editor.add({
+          name: "sailing3d-refresh",
+          description: "Re-query the Sailing3D gateway and update the sailing3d model list",
+          execute: async (input) => {
+            const summary = await refresh()
+            try {
+              await ctx.session.synthetic({
+                sessionID: input.sessionID,
+                text: `[sailing3d-model-sync] ${summary}`,
+                description: "Sailing3D model sync",
+                resume: false,
+              })
+            } catch (error) {
+              console.warn(`[sailing3d-model-sync] could not report the refresh: ${String(error)}`)
+            }
+          },
+        })
+      })
+    } catch (error) {
+      console.warn(`[sailing3d-model-sync] could not register /sailing3d-refresh: ${String(error)}`)
     }
 
     const timer = setInterval(() => void refresh(), refreshMs)

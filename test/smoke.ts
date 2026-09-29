@@ -73,6 +73,8 @@ type FakeState = {
   integration: Record<string, any> | undefined
   integrationMethods: Array<Record<string, any>>
   removedMethods: Array<{ integrationID: string; method: Record<string, any> }>
+  commands: Array<{ name: string; description?: string; execute: (input: any) => Promise<void> }>
+  synthetic: Array<Record<string, any>>
 }
 
 const originalFetch = globalThis.fetch
@@ -120,6 +122,8 @@ function createContext(options: {
     integration: undefined,
     integrationMethods: [],
     removedMethods: [],
+    commands: [],
+    synthetic: [],
   }
 
   const removedProviders = new Set<string>()
@@ -209,6 +213,22 @@ function createContext(options: {
       connection: {
         active: async () => (options.connectKey ? { type: "credential", id: "cred_test", label: "Sailing3D Gateway", method: "key" } : undefined),
         resolve: async () => (options.connectKey ? { type: "key", key: options.connectKey } : undefined),
+      },
+    },
+    command: {
+      transform: async (callback: (editor: any) => void) => {
+        callback({
+          add: (definition: { name: string; description?: string; execute: (input: any) => Promise<void> }) => {
+            state.commands.push(definition)
+          },
+        })
+      },
+      list: async () => ({ data: state.commands.map(({ name, description }) => ({ name, description })) }),
+      reload: async () => {},
+    },
+    session: {
+      synthetic: async (input: Record<string, any>) => {
+        state.synthetic.push(input)
       },
     },
     event: {
@@ -445,12 +465,32 @@ process.env.SAILING3D_API_KEY = "env-key"
   await cleanup?.()
 }
 
+// 13. /sailing3d-refresh re-queries the gateway on demand and reports back into
+//     the session.
+{
+  const { context, state } = createContext({ connectKey: "connect-key", options: { catalog: false } })
+  const cleanup = await plugin.setup(context)
+  const command = state.commands.find(({ name }) => name === "sailing3d-refresh")
+  assert.ok(command, "expected the manual refresh command to be registered")
+  assert.ok(command.description, "the command needs a description for the palette")
+  const reloadsBefore = state.reloads
+  lastAuth = undefined
+  await command.execute({ sessionID: "ses_test" })
+  assert.equal(lastAuth, "Bearer connect-key", "the command must re-query the gateway")
+  assert.ok(state.reloads > reloadsBefore, "the command must republish the provider")
+  assert.deepEqual(state.synthetic.length, 1)
+  assert.match(state.synthetic[0].text, /refreshed \d+ models/)
+  assert.equal(state.synthetic[0].sessionID, "ses_test")
+  assert.equal(state.synthetic[0].resume, false)
+  await cleanup?.()
+}
+
 globalThis.fetch = originalFetch
 await rm(catalogDir, { recursive: true, force: true })
 console.log(
   JSON.stringify({
     provider: "sailing3d",
-    scenarios: 12,
+    scenarios: 13,
     modelCount: ids.length,
   }),
 )

@@ -39,6 +39,26 @@ opencode reload
 
 反过来，注销凭据后模型也会立即消失，这是预期行为而不是 bug。
 
+## 手动刷新
+
+除了自动触发（启动、凭据变更、每 6 小时），可以随时在 TUI 里跑一条斜杠命令：
+
+```
+/sailing3d-refresh
+```
+
+它立即重新请求网关的 `/v1/models`、重新发布 `sailing3d` provider，然后在会话里回一行结果：
+
+```
+[sailing3d-model-sync] refreshed 8 models from https://ai-api.sailing3d.cn/v1/models
+```
+
+- 凭据已失效时它同样执行清理，回一行 `no credential for Sailing3D Gateway; removed the provider…`。
+- 发现请求失败时保留上一次的清单，并回 `refresh failed (…); kept the previous N models`。
+- 它只跑一次发现，**不重新加载插件**，所以比 `opencode reload` / 重启 App 轻得多。
+
+等价但更重的命令行方式是 `opencode reload`：它会重新执行所有插件的 `setup`（其中包含一次发现）。
+
 ## 凭据
 
 插件按以下顺序解析用于「模型发现」的 key：
@@ -99,7 +119,9 @@ provider 设置里保留 `{env:SAILING3D_API_KEY}` 占位符：OpenCode 不会�
 启动时插件请求网关的模型列表，并读取 OpenCode 缓存的 models.dev 快照
 （`~/.cache/opencode/models.json`；兼容 `$XDG_CACHE_HOME` 与 `%USERPROFILE%`），然后合并进
 `sailing3d` provider。它每 6 小时刷新一次，并在这几类事件后立即刷新：`models-dev.refreshed`
-（重读缓存）、`credential.updated` / `credential.switched` / `integration.updated`。
+（重读缓存）、`credential.updated` / `credential.switched` / `integration.updated`；另外还有一条
+手动入口 `/sailing3d-refresh`（见「手动刷新」）。定时刷新与事件触发都走同一个 `refresh()`，
+启动时的 `setup` 用的是同一套发现逻辑。
 
 最后这组凭据事件很关键：OpenCode 不会因为新连接而重新执行插件 `setup`，也不会像内置 provider
 那样把插件发现的模型按凭据可用性自动挂载/卸载。所以 `/connect` 一个 Sailing3D key 之后，是这些
@@ -172,6 +194,7 @@ provider 优先级，并在记录冲突时告警。缺少元数据时使用 Open
 | 模型选择器里没有 `sailing3d/...` | ① `opencode plugin list` 确认插件已加载；② `opencode auth list` 应有 `Sailing3D Gateway … stored`——没有就是还没 `/connect`，连上后应立即出现，不用重启 |
 | `auth list` 里出现以 `environment` 结尾的 Sailing3D 行 | 要么插件还是 0.3（`opencode plugin update`），要么配置里仍写着 `providers.sailing3d.env`——0.4 已不参与模型发现，建议删掉 |
 | 改了配置没生效 | 只改配置 → `opencode reload`；改了插件 → `opencode plugin update` |
+| 想立刻重新拉取模型清单 | TUI 里跑 `/sailing3d-refresh`（只做一次发现，不重载插件） |
 | 上下文长度 / 价格是默认值 | `~/.cache/opencode/models.json` 的 mtime 超过 24 小时即过期，`catalogFallback`（默认开启）会请求 models.dev；离线时设 `catalogFallback: false` 并接受默认值 |
 | 某个模型调用报 `model id does not exist` | 网关自身不一致：`/v1/models` 给出 `kimi-k3-256k`，聊天接口却要求 `k3`。插件原样透传 ID、不做猜测，属网关侧问题 |
 
