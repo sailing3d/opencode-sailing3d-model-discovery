@@ -177,7 +177,11 @@ provider 优先级，并在记录冲突时告警。缺少元数据时使用 Open
         "includeModels": ["^glm-"],
         "excludeModels": ["-preview$"],
         // 默认开启；设 false 可完全离线
-        "catalogFallback": true
+        "catalogFallback": true,
+        // 默认开启；按 models.dev 生成思考档位变体
+        "catalogVariants": true,
+        // 只保留网关真正认的档位（可选）
+        "variantEfforts": ["off", "low", "high"]
       }
     }
   ]
@@ -197,6 +201,31 @@ provider 优先级，并在记录冲突时告警。缺少元数据时使用 Open
 | `catalog` | `boolean` | `true` | 设为 `false` 可跳过 models.dev 元数据补充。 |
 | `includeModels` | `string[]` | `[]` | 只保留匹配任一正则的模型 id。 |
 | `excludeModels` | `string[]` | `[]` | 丢弃匹配任一正则的模型 id。 |
+| `catalogVariants` | `boolean` | `true` | 依据 models.dev 的 `reasoning_options` 为每个模型生成思考档位变体；设 `false` 则不生成。 |
+| `variantEfforts` | `string[]` | `[]`（全部） | 只生成列出的档位，并按此顺序排列；`off` 也需显式列出才会保留。 |
+
+## 变体（思考档位）
+
+网关本身不提供档位信息（`/v1/models` 只返回 id），但 OpenCode 的变体可以从 models.dev 的
+`reasoning_options` 推导出来。插件默认对每个模型生成对应变体：
+
+| 变体 | 请求体字段 | 来源 |
+| --- | --- | --- |
+| `#off` | `{"thinking":{"type":"disabled"}}` | models.dev 有 `toggle` 类型（且没有 `none` 档） |
+| `#none` `#low` `#medium` `#high` `#max` … | `{"reasoning_effort":"<档位>"}` | models.dev 的 `effort` 档位列表 |
+
+用法：在 `/models` 里选择模型的变体，或直接 `-m sailing3d/deepseek-v4.1-flash#high`。
+`budget_tokens` 类型的描述无法映射成请求字段，会被跳过（不会瞎猜）。
+
+注意：
+
+- **默认（不带变体）就是开启思考**，用的是网关/模型自己的默认档；`#off` 才是关闭。
+- 网关对不认识的档位**静默忽略**：实测 deepseek 系列认 `none` / `low` / `high`，
+  `minimal` / `medium` / `xhigh` / `max` 不报错但也无效。只想要可用档位时用 `variantEfforts`
+  收窄，例如 `["off", "low", "high"]`。
+- 配置里手写的 `variants` **优先**于自动生成的结果（按模型 id 覆盖）。
+- 自动生成的变体只依赖 models.dev 元数据：设 `catalog: false` 或模型在 models.dev 没有
+  `reasoning_options` 时，该模型不会有变体。
 
 ## 排查
 

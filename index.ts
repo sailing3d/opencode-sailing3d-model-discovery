@@ -62,6 +62,19 @@ type PluginOptions = {
   includeModels?: string[]
   /** Drop discovered model ids matching any of these regular expressions. */
   excludeModels?: string[]
+  /**
+   * Generate per-model `variants` from the models.dev `reasoning_options` of
+   * each model (for example `low`, `high`, `max`). Enabled by default; set
+   * `false` to leave the inventory without generated variants.
+   */
+  catalogVariants?: boolean
+  /**
+   * Only emit these reasoning-effort values, in this order (for example
+   * `["none", "low", "high"]`). Values the catalog offers but this list does
+   * not mention are dropped, which is useful when the gateway silently ignores
+   * an effort level.
+   */
+  variantEfforts?: string[]
 }
 
 type CatalogModel = {
@@ -143,7 +156,54 @@ function keepModel(id: string, include: RegExp[], exclude: RegExp[]): boolean {
   return true
 }
 
-function makeModel(gatewayID: string, entry?: InventoryRecord): Model.Info {
+type Variant = {
+  id: string
+  body: Record<string, unknown>
+}
+
+// Reasonable default order for the model picker. models.dev does not guarantee
+// an order, and a stable one keeps the menu from moving between refreshes.
+const EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+// models.dev describes reasoning control per model. The Sailing3D gateway is an
+// OpenAI-compatible shim in front of several backends: it accepts
+// `reasoning_effort` for graded thinking and `thinking: {type: "disabled"}` for
+// a hard off. Descriptors that cannot be expressed as a request field
+// (`budget_tokens`) are skipped rather than guessed at.
+function catalogVariants(source: CatalogModel | undefined, allowlist: readonly string[] | undefined): Variant[] | undefined {
+  const options = source?.reasoning_options
+  if (!Array.isArray(options) || options.length === 0) return undefined
+
+  const efforts: string[] = []
+  let toggle = false
+  for (const option of options) {
+    if (option?.type === "toggle") toggle = true
+    if (option?.type !== "effort" || !Array.isArray(option.values)) continue
+    for (const value of option.values) {
+      if (typeof value === "string" && value && !efforts.includes(value)) efforts.push(value)
+    }
+  }
+
+  const restricted = allowlist && allowlist.length > 0 ? allowlist : undefined
+  const order = restricted ?? EFFORT_ORDER
+  const rank = (value: string) => {
+    const index = order.indexOf(value)
+    return index < 0 ? Number.MAX_SAFE_INTEGER : index
+  }
+  const selected = efforts.filter((value) => !restricted || restricted.includes(value)).sort((a, b) => rank(a) - rank(b))
+
+  const variants: Variant[] = []
+  // A model that can be toggled off but offers no explicit `none` effort gets a
+  // dedicated off variant; `none` already covers it when present. An explicit
+  // allowlist has to mention `off` for that variant to appear.
+  if (toggle && !selected.includes("none") && (!restricted || restricted.includes("off"))) {
+    variants.push({ id: "off", body: { thinking: { type: "disabled" } } })
+  }
+  for (const effort of selected) variants.push({ id: effort, body: { reasoning_effort: effort } })
+  return variants.length > 0 ? variants : undefined
+}
+
+function makeModel(gatewayID: string, entry?: InventoryRecord, variants?: Variant[]): Model.Info {
   const source = entry?.model
   const model = Model.Info.default(providerID, Model.ID.make(gatewayID))
   const result: any = {
@@ -177,6 +237,7 @@ function makeModel(gatewayID: string, entry?: InventoryRecord): Model.Info {
   if (source?.interleaved && typeof source.interleaved === "object" && source.interleaved.field) {
     result.compatibility = { ...(result.compatibility ?? { reasoningField: "" }), reasoningField: source.interleaved.field }
   }
+  if (variants && variants.length > 0) result.variants = variants
   return result
 }
 
@@ -327,6 +388,8 @@ async function discover(input: {
   catalog: boolean
   include: RegExp[]
   exclude: RegExp[]
+  variants: boolean
+  variantEfforts: readonly string[] | undefined
 }): Promise<SerializedModel[]> {
   const gateway = await requestJSON<ModelListResponse>(
     input.gatewayURL,
@@ -372,7 +435,7 @@ async function discover(input: {
   return ids.map((id) => {
     const match = resolveCatalogModel(id, catalog)
     if (!match) console.warn(`[sailing3d-model-sync] no models.dev metadata for ${id}; using OpenCode fallback limits`)
-    return makeModel(id, match)
+    return makeModel(id, match, input.variants ? catalogVariants(match?.model, input.variantEfforts) : undefined)
   })
 }
 
@@ -454,6 +517,24 @@ export default Plugin.define({
     const useCatalog = options.catalog !== false
     const include = compileFilters(options.includeModels)
     const exclude = compileFilters(options.excludeModels)
+    const useCatalogVariants = options.catalogVariants !== false
+    const variantEfforts = Array.isArray(options.variantEfforts)
+      ? options.variantEfforts.filter((value): value is string => typeof value === "string" && Boolean(value))
+      : undefined
+    const discoverModels = (apiKey: string) =>
+      discover({
+        apiKey,
+        gatewayURL,
+        catalogFile,
+        catalogFallbackURL,
+        catalogMaxAgeMs,
+        timeoutMs,
+        catalog: useCatalog,
+        include,
+        exclude,
+        variants: useCatalogVariants,
+        variantEfforts,
+      })
 
     try {
       await registerIntegration(ctx)
@@ -496,7 +577,7 @@ export default Plugin.define({
     if (apiKey) {
       enabled = true
       try {
-        models = await discover({ apiKey, gatewayURL, catalogFile, catalogFallbackURL, catalogMaxAgeMs, timeoutMs, catalog: useCatalog, include, exclude })
+        models = await discoverModels(apiKey)
       } catch (error) {
         console.warn(`[sailing3d-model-sync] initial discovery failed; using cached inventory if available: ${String(error)}`)
         const cached = await ctx.storage.get(cacheKey)
@@ -562,10 +643,7 @@ export default Plugin.define({
           console.warn(`[sailing3d-model-sync] ${message}`)
           return message
         }
-        const latest = mergeConfiguredModels(
-          await discover({ apiKey: key, gatewayURL, catalogFile, catalogFallbackURL, catalogMaxAgeMs, timeoutMs, catalog: useCatalog, include, exclude }),
-          configuredOverrides,
-        )
+        const latest = mergeConfiguredModels(await discoverModels(key), configuredOverrides)
         models = latest
         enabled = true
         await ctx.provider.reload()

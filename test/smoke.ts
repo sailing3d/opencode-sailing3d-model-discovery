@@ -24,7 +24,12 @@ const catalog = {
     models: {
       "deepseek-flash": { name: "DeepSeek V4.1 Flash", limit: { context: 1_000_000, output: 384_000 }, modalities: { input: ["text", "image"], output: ["text"] } },
       "deepseek-v4-flash": { name: "DeepSeek V4 Flash", limit: { context: 1_000_000, output: 384_000 }, modalities: { input: ["text", "image"], output: ["text"] } },
-      "deepseek-v4.1-flash": { name: "DeepSeek V4.1 Flash", limit: { context: 1_000_000, output: 384_000 }, modalities: { input: ["text", "image"], output: ["text"] } },
+      "deepseek-v4.1-flash": {
+        name: "DeepSeek V4.1 Flash",
+        limit: { context: 1_000_000, output: 384_000 },
+        modalities: { input: ["text", "image"], output: ["text"] },
+        reasoning_options: [{ type: "toggle" }, { type: "effort", values: ["low", "high", "max"] }],
+      },
     },
   },
   zhipuai: {
@@ -38,6 +43,7 @@ const catalog = {
         cost: { input: 1, output: 2, cache_read: 0.1, cache_write: 0.2 },
         limit: { context: 1_000_000, output: 131_072 },
         modalities: { input: ["text"], output: ["text"] },
+        reasoning_options: [{ type: "effort", values: ["low", "high", "max"] }],
       },
       "glm-5.3-flash": { name: "GLM-5.3-Flash", tool_call: true, limit: { context: 1_000_000, output: 131_072 }, modalities: { input: ["text", "image", "video", "pdf"], output: ["text"] } },
     },
@@ -56,7 +62,13 @@ const catalog = {
   },
   "alibaba-cn": {
     models: {
-      "qwen3.8-flash": { name: "Qwen3.8 Flash", tool_call: true, limit: { context: 1_000_000, output: 131_072 }, modalities: { input: ["text", "image", "video"], output: ["text"] } },
+      "qwen3.8-flash": {
+        name: "Qwen3.8 Flash",
+        tool_call: true,
+        limit: { context: 1_000_000, output: 131_072 },
+        modalities: { input: ["text", "image", "video"], output: ["text"] },
+        reasoning_options: [{ type: "toggle" }, { type: "effort", values: ["low", "medium", "xhigh"] }, { type: "budget_tokens", max: 262_144 }],
+      },
     },
   },
 }
@@ -537,12 +549,84 @@ process.env.SAILING3D_API_KEY = "env-key"
   assert.equal(handler, undefined, "cleanup must unsubscribe")
 }
 
+// 15. Reasoning variants are generated from the models.dev catalog.
+{
+  const { context, state } = createContext({ connectKey: "connect-key" })
+  const cleanup = await plugin.setup(context)
+
+  const deepseek = state.replacedModels.find(({ id }) => id === "deepseek-v4.1-flash")!
+  assert.deepEqual(deepseek.variants, [
+    { id: "off", body: { thinking: { type: "disabled" } } },
+    { id: "low", body: { reasoning_effort: "low" } },
+    { id: "high", body: { reasoning_effort: "high" } },
+    { id: "max", body: { reasoning_effort: "max" } },
+  ])
+
+  // Effort-only models get no off variant.
+  const glm = state.replacedModels.find(({ id }) => id === "glm-5.3")!
+  assert.deepEqual(glm.variants, [
+    { id: "low", body: { reasoning_effort: "low" } },
+    { id: "high", body: { reasoning_effort: "high" } },
+    { id: "max", body: { reasoning_effort: "max" } },
+  ])
+
+  // `budget_tokens` descriptors are not mapped to a request field.
+  const qwen = state.replacedModels.find(({ id }) => id === "qwen3.8-flash")!
+  assert.deepEqual(qwen.variants, [
+    { id: "off", body: { thinking: { type: "disabled" } } },
+    { id: "low", body: { reasoning_effort: "low" } },
+    { id: "medium", body: { reasoning_effort: "medium" } },
+    { id: "xhigh", body: { reasoning_effort: "xhigh" } },
+  ])
+
+  // Models without reasoning_options in the catalog stay variant-free.
+  assert.deepEqual(state.replacedModels.find(({ id }) => id === "kimi-k3-256k")!.variants, [])
+  await cleanup?.()
+}
+
+// 16. catalogVariants turns generation off, variantEfforts narrows it.
+{
+  const { context, state } = createContext({ options: { catalogVariants: false }, connectKey: "connect-key" })
+  const cleanup = await plugin.setup(context)
+  assert.ok(state.replacedModels.every((model) => (model.variants ?? []).length === 0))
+  await cleanup?.()
+}
+{
+  const { context, state } = createContext({ options: { variantEfforts: ["high", "off"] }, connectKey: "connect-key" })
+  const cleanup = await plugin.setup(context)
+  const deepseek = state.replacedModels.find(({ id }) => id === "deepseek-v4.1-flash")!
+  assert.deepEqual(deepseek.variants, [
+    { id: "off", body: { thinking: { type: "disabled" } } },
+    { id: "high", body: { reasoning_effort: "high" } },
+  ])
+  // The allowlist also filters the toggle-derived off variant.
+  const glm = state.replacedModels.find(({ id }) => id === "glm-5.3")!
+  assert.deepEqual(glm.variants, [{ id: "high", body: { reasoning_effort: "high" } }])
+  await cleanup?.()
+}
+
+// 17. Explicitly configured variants win over generated ones.
+{
+  const configured = {
+    id: "deepseek-v4.1-flash",
+    variants: [{ id: "mine", body: { reasoning_effort: "high" } }],
+  }
+  const { context, state } = createContext({
+    connectKey: "connect-key",
+    configuredOnly: { "deepseek-v4.1-flash": configured },
+  })
+  const cleanup = await plugin.setup(context)
+  const deepseek = state.replacedModels.find(({ id }) => id === "deepseek-v4.1-flash")!
+  assert.deepEqual(deepseek.variants, [{ id: "mine", body: { reasoning_effort: "high" } }])
+  await cleanup?.()
+}
+
 globalThis.fetch = originalFetch
 await rm(catalogDir, { recursive: true, force: true })
 console.log(
   JSON.stringify({
     provider: "sailing3d",
-    scenarios: 14,
+    scenarios: 17,
     modelCount: ids.length,
   }),
 )
