@@ -74,31 +74,75 @@ synthetic 消息，再由 TUI 侧插件把它升级成 toast。若 TUI 插件没
 
 等价但更重的命令行方式是 `opencode reload`：它会重新执行所有插件的 `setup`（其中包含一次发现）。
 
-## 研发知识库（Dev-KB）按用户组自动注入
+## 研发知识库（Dev-KB）按用户组自动注入与使用示例
 
 当插件通过当前凭据请求网关 `/v1/models` 时，会根据网关返回的模型清单自动识别当前账号所属权限组：
 
 - **首次安装未配置 API Key，或账号未加入 `dev-group`（`/v1/models` 不含 `dev-kb`）**：
-  插件**不会**暴露任何知识库子智能体、Skill 或 `/kb-*` 斜杠命令。
+  插件**不会**暴露任何知识库子智能体、Skill、工具或 `/kb-*` 斜杠命令。
 - **账号已加入 `dev-group`（`/v1/models` 返回 `dev-kb`）**：
-  插件在完成模型发现的同时，通过 OpenCode v2 Plugin API 零配置自动注入以下四项能力（通过 `/connect` 绑定凭据或执行 `/sailing3d-refresh` 后立即生效，无需重启）：
-  1. **`dev_kb` 原生工具（`ctx.tool.transform`）**：供任意主编程模型（DeepSeek / Kimi / Qwen / GPT 等）直接调用知识库网关执行检索或读写指令（`/kb-add`、`/kb-append`、`/kb-edit`、`/kb-del`、`/kb-pref`、`/kb-status` 等）。
-  2. **`@kb-agent` 专职子智能体（`ctx.agent.transform`）**：固定绑定 `sailing3d/dev-kb` 模型并禁用本地工具调用，单次请求直通知识库网关。支持在任意对话中手动 `@kb-agent` 提问，或由主编程模型作为 subagent 自动委派。
-  3. **`dev-kb` 内置技能（`ctx.skill.transform`，`autoinvoke: true`）**：纯内存注入技能说明，使主模型自动获知何时以及如何调用 `dev_kb` 工具或委派 `@kb-agent`。
-  4. **`/kb-*` 快捷斜杠命令（`ctx.command.transform`）**：在任意会话输入框中直接输入即可执行并立即在对话框中显示回复：
-     - `/kb-help`：查看研发知识库使用指南与快捷指令
-     - `/kb-status`：查看知识库文档目录与状态
-     - `/kb-whoami`：查看当前账号身份与个人研发偏好
-     - `/kb-boot`：查看当前会话自动注入上下文
-     - `/kb-pref [偏好内容 | clear]`：查看、新增或清空个人研发偏好
-     - `/kb-ask <问题>`：直接检索研发知识库
-     - `/kb-add [分类 #] 标题 | 正文`：新增团队知识库文档
-     - `/kb-append <doc_id或标题> | 内容`：向已有知识库文档追加内容
-     - `/kb-edit <doc_id或标题> | 完整新正文`：覆盖修订已有知识库文档
-     - `/kb-del <doc_id或标题> | 删除原因`：归档删除知识库文档
-     - `/kb-history [doc_id或标题]`：查看知识库近期变更记录
+  插件在完成模型发现的同时，通过 OpenCode v2 Plugin API 零配置自动注入以下能力（通过 `/connect` 绑定凭据或执行 `/sailing3d-refresh` 后立即生效，无需重启）。当注销凭据或切换为非 `dev-group` 凭据时，相关能力会随 provider 刷新自动卸载。
 
-当注销凭据或切换为非 `dev-group` 凭据时，上述 `dev_kb` 工具、`@kb-agent`、`dev-kb` Skill 与 `/kb-*` 命令会随 provider 刷新自动卸载。
+### 用法 1：`/kb-*` 快捷斜杠命令（输入框直接执行）
+
+在任意会话输入框中直接输入 `/kb-*` 命令，插件会自动通过 `@kb-agent` 调用知识库网关并将结果直接显示在当前对话中（不消耗主编程模型上下文）：
+
+```text
+# 1. 查看帮助与身份状态
+/kb-help
+/kb-whoami
+/kb-status
+/kb-boot
+
+# 2. 检索研发知识库问答
+/kb-ask 部署新容器有什么网络和端口规范？
+
+# 3. 查看、新增或清空个人研发偏好
+/kb-pref
+/kb-pref 代码示例默认使用 Python 3.12，架构图优先使用 Mermaid
+/kb-pref clear
+
+# 4. 新增知识库文档（格式：[分类 #] 标题 | 正文，使用单个 | 分隔标题与正文）
+/kb-add 运维规范 # Docker 容器网络规范 | 新增服务容器须接入统一内部网络并分配固定 IP。
+
+# 5. 秒级向已有文档追加段落（支持传 doc_id 或文档标题）
+/kb-append Docker 容器网络规范 | 补充：网关服务固定使用 8090 端口。
+
+# 6. 覆盖修订已有文档全文
+/kb-edit Docker 容器网络规范 | 修订后的完整文档正文内容...
+
+# 7. 归档删除过期文档并记录原因
+/kb-del 临时测试文档 | 测试完毕，归档清理
+
+# 8. 查看全局或单篇文档的变更留痕记录
+/kb-history
+/kb-history Docker 容器网络规范
+```
+
+### 用法 2：`dev-kb` Skill + `dev_kb` 原生工具（主模型自然语言自动调用）
+
+在日常使用任意主力编程模型（如 DeepSeek、Kimi、Qwen、GPT 等）写代码或排障时，无需手动切换模型或背诵命令格式。内置的 `dev-kb` Skill（`autoinvoke: true`）会引导主模型自动调用 `dev_kb` 原生工具：
+
+- **查规范写代码**：
+  > 「先查一下研发知识库里的容器网络规范，再帮我写一份新服务的 `docker-compose.yml`」
+  - 主模型会自动调用 `dev_kb(command="容器网络规范")` 检索知识库，再结合团队规范生成代码。
+- **沉淀排障经验**：
+  > 「把刚才我们排查通过的插件依赖避坑方案整理一下，沉淀到研发知识库，标题叫『OpenCode TUI 插件开发避坑指南』」
+  - 主模型会自动提炼总结并调用 `dev_kb(command="/kb-add 架构与规范 # OpenCode TUI 插件开发避坑指南 | ...")` 完成写入与留痕。
+- **追加补充说明**：
+  > 「帮我在知识库『OpenCode TUI 插件开发避坑指南』那篇文档后面追加一条：发布前必须执行 `npm test`」
+  - 主模型会自动调用 `dev_kb(command="/kb-append OpenCode TUI 插件开发避坑指南 | 发布前必须执行 npm test")`。
+
+### 用法 3：`@kb-agent` 专职子智能体（手动 `@` 呼叫或 Subagent 委派）
+
+`@kb-agent` 固定绑定 `sailing3d/dev-kb` 模型并禁用本地工具调用，确保单次请求直通知识库网关：
+
+- **在输入框直接 `@kb-agent` 提问或写入**：
+  - `@kb-agent 帮我查一下团队知识库里关于切片参数的约定`
+  - `@kb-agent /kb-add 故障排查 # 渠道测试超时排查 | 原因是容器未加入互通网络，连接网络后恢复。`
+- **让主模型作为 Subagent 委派任务**：
+  - 「请派 `@kb-agent` 先把知识库里所有关于部署架构的文档查出来汇总，你再根据汇总结果设计新模块的方案」
+
 
 ## 凭据
 
