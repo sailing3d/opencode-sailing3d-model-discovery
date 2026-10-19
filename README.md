@@ -81,20 +81,24 @@ synthetic 消息，再由 TUI 侧插件把它升级成 toast。若 TUI 插件没
 - **首次安装未配置 API Key，或账号未加入 `dev-group`（`/v1/models` 不含 `dev-kb`）**：
   插件**不会**暴露任何知识库子智能体、Skill 或 `/kb-*` 斜杠命令。
 - **账号已加入 `dev-group`（`/v1/models` 返回 `dev-kb`）**：
-  插件在完成模型发现的同时，通过 OpenCode v2 Plugin API 零配置自动注入以下三项能力（通过 `/connect` 绑定凭据或执行 `/sailing3d-refresh` 后立即生效，无需重启）：
-  1. **`@kb-agent` 专职子智能体（`ctx.agent.transform`）**：固定绑定 `sailing3d/dev-kb` 模型并禁用本地工具调用，单次请求直通知识库网关。支持在任意对话中手动 `@kb-agent` 提问，或由主编程模型作为 subagent 自动委派。
-  2. **`dev-kb` 内置技能（`ctx.skill.transform`，`autoinvoke: true`）**：纯内存注入技能说明，使主模型（DeepSeek / Kimi / Qwen / GPT 等）自动获知何时以及如何向 `kb-agent` 委派知识检索、文档沉淀与个人偏好管理任务。
-  3. **`/kb-*` 快捷斜杠命令（`ctx.command.transform`）**：在任意主模型会话中均可直接调用，结果以 synthetic 消息直接回显到当前会话（不消耗主模型推理轮次）：
+  插件在完成模型发现的同时，通过 OpenCode v2 Plugin API 零配置自动注入以下四项能力（通过 `/connect` 绑定凭据或执行 `/sailing3d-refresh` 后立即生效，无需重启）：
+  1. **`dev_kb` 原生工具（`ctx.tool.transform`）**：供任意主编程模型（DeepSeek / Kimi / Qwen / GPT 等）直接调用知识库网关执行检索或读写指令（`/kb-add`、`/kb-append`、`/kb-edit`、`/kb-del`、`/kb-pref`、`/kb-status` 等）。
+  2. **`@kb-agent` 专职子智能体（`ctx.agent.transform`）**：固定绑定 `sailing3d/dev-kb` 模型并禁用本地工具调用，单次请求直通知识库网关。支持在任意对话中手动 `@kb-agent` 提问，或由主编程模型作为 subagent 自动委派。
+  3. **`dev-kb` 内置技能（`ctx.skill.transform`，`autoinvoke: true`）**：纯内存注入技能说明，使主模型自动获知何时以及如何调用 `dev_kb` 工具或委派 `@kb-agent`。
+  4. **`/kb-*` 快捷斜杠命令（`ctx.command.transform`）**：在任意会话输入框中直接输入即可执行并立即在对话框中显示回复：
      - `/kb-help`：查看研发知识库使用指南与快捷指令
      - `/kb-status`：查看知识库文档目录与状态
      - `/kb-whoami`：查看当前账号身份与个人研发偏好
+     - `/kb-boot`：查看当前会话自动注入上下文
      - `/kb-pref [偏好内容 | clear]`：查看、新增或清空个人研发偏好
      - `/kb-ask <问题>`：直接检索研发知识库
-     - `/kb-add [分类] # 标题\n正文`：新增团队知识库文档
-     - `/kb-append <doc_id或标题>\n内容`：向已有知识库文档追加内容
-     - `/kb-history`：查看知识库近期变更记录
+     - `/kb-add [分类 #] 标题 | 正文`：新增团队知识库文档
+     - `/kb-append <doc_id或标题> | 内容`：向已有知识库文档追加内容
+     - `/kb-edit <doc_id或标题> | 完整新正文`：覆盖修订已有知识库文档
+     - `/kb-del <doc_id或标题> | 删除原因`：归档删除知识库文档
+     - `/kb-history [doc_id或标题]`：查看知识库近期变更记录
 
-当注销凭据或切换为非 `dev-group` 凭据时，上述 `@kb-agent`、`dev-kb` Skill 与 `/kb-*` 命令会随 provider 刷新自动卸载。
+当注销凭据或切换为非 `dev-group` 凭据时，上述 `dev_kb` 工具、`@kb-agent`、`dev-kb` Skill 与 `/kb-*` 命令会随 provider 刷新自动卸载。
 
 ## 凭据
 

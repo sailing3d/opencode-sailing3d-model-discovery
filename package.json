@@ -1,7 +1,7 @@
 {
   "name": "opencode-sailing3d-model-discovery",
-  "version": "0.8.0",
-  "description": "OpenCode v2 plugin to discover Sailing3D gateway models, enrich them with models.dev metadata, and expose Dev-KB subagent/skill/commands for authorized user groups",
+  "version": "0.8.1",
+  "description": "OpenCode v2 plugin to discover Sailing3D gateway models, enrich them with models.dev metadata, and expose Dev-KB subagent/skill/tool/commands for authorized user groups",
   "type": "module",
   "main": "./index.ts",
   "exports": {

@@ -88,8 +88,10 @@ type FakeState = {
   removedMethods: Array<{ integrationID: string; method: Record<string, any> }>
   agents: Map<string, Record<string, any>>
   skills: Map<string, Record<string, any>>
+  tools: Map<string, Record<string, any>>
   commands: Array<{ name: string; description?: string; execute: (input: any) => Promise<void> }>
   synthetic: Array<Record<string, any>>
+  prompts: Array<Record<string, any>>
 }
 
 const originalFetch = globalThis.fetch
@@ -148,14 +150,17 @@ function createContext(options: {
     removedMethods: [],
     agents: new Map(),
     skills: new Map(),
+    tools: new Map(),
     commands: [],
     synthetic: [],
+    prompts: [],
   }
 
   const removedProviders = new Set<string>()
   const transforms: Array<(editor: any) => void> = []
   const agentTransforms: Array<(editor: any) => void> = []
   const skillTransforms: Array<(editor: any) => void> = []
+  const toolTransforms: Array<(editor: any) => void> = []
   const commandTransforms: Array<(editor: any) => void> = []
 
   const makeEditor = () => ({
@@ -231,6 +236,24 @@ function createContext(options: {
     },
   })
 
+  const makeToolEditor = () => ({
+    list: () => [...state.tools.values()],
+    get: (id: string) => state.tools.get(id),
+    namespace: () => {},
+    add: (tool: Record<string, any>) => {
+      state.tools.set(tool.name, { ...tool, id: tool.name })
+    },
+    update: (id: string, mutate: (tool: Record<string, any>) => void) => {
+      const existing = state.tools.get(id)
+      if (!existing) return
+      mutate(existing)
+      state.tools.set(id, existing)
+    },
+    remove: (id: string) => {
+      state.tools.delete(id)
+    },
+  })
+
   const makeCommandEditor = () => ({
     add: (definition: { name: string; description?: string; execute: (input: any) => Promise<void> }) => {
       state.commands.push(definition)
@@ -278,6 +301,15 @@ function createContext(options: {
         for (const callback of skillTransforms) callback(makeSkillEditor())
       },
     },
+    tool: {
+      transform: async (callback: (editor: any) => void) => {
+        toolTransforms.push(callback)
+        callback(makeToolEditor())
+      },
+      reload: async () => {
+        for (const callback of toolTransforms) callback(makeToolEditor())
+      },
+    },
     integration: {
       transform: async (callback: (editor: any) => void) => {
         if (options.failIntegrationRegistration) throw new Error("integration transform unavailable")
@@ -318,8 +350,12 @@ function createContext(options: {
       },
     },
     session: {
+      get: async () => ({ id: "ses_test", model: { providerID: "sailing3d", id: "kimi-for-coding" } }),
       synthetic: async (input: Record<string, any>) => {
         state.synthetic.push(input)
+      },
+      prompt: async (input: Record<string, any>) => {
+        state.prompts.push(input)
       },
     },
     event: {
@@ -700,13 +736,14 @@ process.env.SAILING3D_API_KEY = "env-key"
 }
 
 // 18. Without `dev-kb` in `/v1/models` (or without any API key on first install),
-//     `@kb-agent`, `dev-kb` skill, and `/kb-*` commands are NOT exposed.
+//     `@kb-agent`, `dev-kb` skill, `dev_kb` tool, and `/kb-*` commands are NOT exposed.
 {
   // First install: no API key
   const { context: ctxNoKey, state: stateNoKey } = createContext()
   const cleanupNoKey = await plugin.setup(ctxNoKey)
   assert.equal(stateNoKey.agents.get("kb-agent"), undefined)
   assert.equal(stateNoKey.skills.get("dev-kb"), undefined)
+  assert.equal(stateNoKey.tools.get("dev_kb"), undefined)
   assert.deepEqual(stateNoKey.commands.map(({ name }) => name), ["sailing3d-refresh"])
   await cleanupNoKey?.()
 
@@ -715,12 +752,13 @@ process.env.SAILING3D_API_KEY = "env-key"
   const cleanupDefault = await plugin.setup(ctxDefault)
   assert.equal(stateDefault.agents.get("kb-agent"), undefined)
   assert.equal(stateDefault.skills.get("dev-kb"), undefined)
+  assert.equal(stateDefault.tools.get("dev_kb"), undefined)
   assert.deepEqual(stateDefault.commands.map(({ name }) => name), ["sailing3d-refresh"])
   await cleanupDefault?.()
 }
 
 // 19. When a `dev-group` user connects (so `/v1/models` includes `dev-kb`),
-//     `@kb-agent`, `dev-kb` skill, and `/kb-*` commands are injected without
+//     `@kb-agent`, `dev-kb` skill, `dev_kb` tool, and `/kb-*` commands are injected without
 //     triggering a remote models.dev fetch; logging out removes them again.
 {
   const fetchesBefore = remoteCatalogFetches
@@ -732,6 +770,7 @@ process.env.SAILING3D_API_KEY = "env-key"
   // Before /connect: nothing exposed
   assert.equal(state.agents.get("kb-agent"), undefined)
   assert.equal(state.skills.get("dev-kb"), undefined)
+  assert.equal(state.tools.get("dev_kb"), undefined)
   assert.deepEqual(state.commands.map(({ name }) => name), ["sailing3d-refresh"])
 
   // User connects with a dev-group key
@@ -757,12 +796,24 @@ process.env.SAILING3D_API_KEY = "env-key"
   assert.ok(kbSkill, "expected dev-kb skill to be registered for dev-group user")
   assert.equal(kbSkill.autoinvoke, true)
   assert.match(kbSkill.content, /@kb-agent/)
+  assert.match(kbSkill.content, /dev_kb/)
 
-  // /kb-* commands are registered and forward to /v1/chat/completions (model: dev-kb)
+  // dev_kb tool is registered and executes against /v1/chat/completions
+  const kbTool = state.tools.get("dev_kb")
+  assert.ok(kbTool, "expected dev_kb tool to be registered for dev-group user")
+  const toolResult = await kbTool.execute({ command: "/kb-add 项目专题 # OMS 指南 | 正文内容" })
+  assert.equal(lastChatRequest?.model, "dev-kb")
+  assert.equal(lastChatRequest?.messages?.[0]?.content, "/kb-add 项目专题 # OMS 指南 | 正文内容")
+  assert.match(String(toolResult.content), /\[dev-kb reply\] handled: \/kb-add 项目专题 # OMS 指南 \| 正文内容/)
+
+  // /kb-* commands are registered, forward to /v1/chat/completions (model: dev-kb),
+  // and trigger session.prompt so the OpenCode chat UI renders the turn
   const commandNames = state.commands.map(({ name }) => name)
   assert.ok(commandNames.includes("kb-help"))
   assert.ok(commandNames.includes("kb-pref"))
   assert.ok(commandNames.includes("kb-add"))
+  assert.ok(commandNames.includes("kb-edit"))
+  assert.ok(commandNames.includes("kb-del"))
   assert.ok(commandNames.includes("kb-ask"))
 
   const kbPrefCmd = state.commands.find(({ name }) => name === "kb-pref")!
@@ -772,13 +823,16 @@ process.env.SAILING3D_API_KEY = "env-key"
   assert.equal(state.synthetic.at(-1)?.sessionID, "ses_kb")
   assert.equal(state.synthetic.at(-1)?.description, "Sailing3D Dev-KB")
   assert.match(state.synthetic.at(-1)?.text ?? "", /\[dev-kb reply\] handled: \/kb-pref 优先使用 TypeScript/)
+  assert.equal(state.prompts.at(-1)?.sessionID, "ses_kb")
+  assert.equal(state.prompts.at(-1)?.text, "/kb-pref 优先使用 TypeScript")
 
-  // Switching to a non-dev-group user removes @kb-agent, dev-kb skill, and /kb-* commands
+  // Switching to a non-dev-group user removes @kb-agent, dev-kb skill, dev_kb tool, and /kb-* commands
   gatewayIds = ids
   const refreshCmd = state.commands.find(({ name }) => name === "sailing3d-refresh")!
   await refreshCmd.execute({ sessionID: "ses_kb" })
   assert.equal(state.agents.get("kb-agent"), undefined, "expected @kb-agent to be removed when dev-kb is no longer in /v1/models")
   assert.equal(state.skills.get("dev-kb"), undefined, "expected dev-kb skill to be removed when dev-kb is no longer in /v1/models")
+  assert.equal(state.tools.get("dev_kb"), undefined, "expected dev_kb tool to be removed when dev-kb is no longer in /v1/models")
   assert.deepEqual(state.commands.map(({ name }) => name), ["sailing3d-refresh"])
 
   await cleanup?.()

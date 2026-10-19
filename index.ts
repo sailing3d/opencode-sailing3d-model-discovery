@@ -23,33 +23,39 @@ const cacheKey = "sailing3d-model-inventory-v1"
 const KB_MODEL_ID = "dev-kb"
 const KB_AGENT_ID = "kb-agent"
 const KB_SKILL_ID = "dev-kb"
+const KB_TOOL_ID = "dev_kb"
 const KB_SYNTHETIC_DESCRIPTION = "Sailing3D Dev-KB"
+const KB_COMMAND_TIMEOUT_MS = 120_000
 
 const KB_SKILL_CONTENT = [
   "# Sailing3D 研发知识库 (Dev-KB) 技能指南",
   "",
-  "当前账号已具备 `dev-kb` 研发知识库访问权限。当对话涉及以下场景时，请优先委派给 `@kb-agent` 子智能体（`kb-agent`）或提示用户使用 `/kb-*` 斜杠命令：",
+  "当前账号已具备 `dev-kb` 研发知识库访问权限。当对话涉及以下场景时，请优先调用原生工具 `dev_kb`（最快、最直接），或委派给 `@kb-agent` 子智能体（`kb-agent`）：",
   "",
   "## 1. 适用场景",
   "- 查询团队内部研发规范、系统架构、部署配置或历史排障经验",
   "- 读取或更新当前开发者的个人研发偏好（代码风格、常用环境等）",
   "- 将当前会话产出的架构方案、排障记录或配置规范沉淀到团队知识库",
   "",
-  "## 2. 子智能体 `@kb-agent` 调用指令格式",
-  "向 `kb-agent` 发送单次请求即可直接返回知识库处理结果：",
+  "## 2. 调用方式（优先使用 `dev_kb` 工具，其次 `@kb-agent` 子智能体）",
+  "- **方式一（推荐）**：直接调用 `dev_kb` 工具，传入 `command` 参数（如 `command: \"/kb-add 标题 | 正文\"`）。",
+  "- **方式二**：调用 `subagent` 工具（`agent: \"kb-agent\"`），`prompt` 请**直接以 `/kb-*` 指令开头**（不要在 `/kb-*` 前添加多余解释导语）。",
   "",
-  "| 操作意图 | 发送给 `kb-agent` 的消息格式 |",
+  "## 3. 指令格式速查",
+  "",
+  "| 操作意图 | 指令格式（传给 `dev_kb` 工具的 `command` 或 `kb-agent` 的 `prompt`） |",
   "| --- | --- |",
   "| 检索知识库问答 | 直接发送具体技术问题（或 `/kb-ask <问题>`） |",
   "| 查看使用指南 | `/kb-help` |",
-  "| 查看身份与个人偏好 | `/kb-whoami` 或 `/kb-pref` |",
-  "| 新增/更新个人偏好 | `/kb-pref <偏好内容>`（清空发送 `/kb-pref clear`） |",
+  "| 查看身份与个人偏好 | `/kb-whoami` |",
+  "| 新增/更新个人偏好 | `/kb-pref <偏好内容>`（重置发送 `/kb-pref clear`） |",
   "| 查看知识库文档目录 | `/kb-status` |",
-  "| 新增知识库文档 | `/kb-add [分类] # 标题\\n正文内容`（可选分类：`架构与设计`、`部署与运维`、`接口与协议`、`踩坑与排障`、`编码与规范`） |",
-  "| 追加内容到已有文档 | `/kb-append <doc_id或标题>\\n追加正文` |",
-  "| 覆盖修订已有文档 | `/kb-edit <doc_id或标题>\\n完整新正文` |",
-  "| 删除知识库文档 | `/kb-del <doc_id或标题>` |",
-  "| 查看近期变更记录 | `/kb-history` |",
+  "| 新增知识库文档 | `/kb-add [分类 #] 标题 \\| 正文内容` 或 `/kb-add [分类 #] 标题\\n正文内容`（可选分类：`架构与设计`、`踩坑与排障`、`运维与规范`、`项目专题`、`接口与协议`；可在首行附加 `project=xxx scope=project\\|global env=dev4`） |",
+  "| 追加内容到已有文档 | `/kb-append <doc_id或标题> \\| 追加正文` 或 `/kb-append <doc_id或标题>\\n追加正文` |",
+  "| 覆盖修订已有文档 | `/kb-edit <doc_id或标题> \\| 完整新正文` 或 `/kb-edit <doc_id或标题>\\n完整新正文` |",
+  "| 删除知识库文档 | `/kb-del <doc_id或标题> \\| 删除原因` |",
+  "| 查看近期变更记录 | `/kb-history [doc_id或标题]` |",
+  "| 查看会话注入上下文 | `/kb-boot` |",
 ].join("\n")
 
 // OpenCode does not re-run plugin setup when a credential is added or removed,
@@ -719,6 +725,11 @@ export default Plugin.define({
         console.warn(`[sailing3d-model-sync] could not reload skills: ${String(error)}`)
       }
       try {
+        await ctx.tool?.reload()
+      } catch (error) {
+        console.warn(`[sailing3d-model-sync] could not reload tools: ${String(error)}`)
+      }
+      try {
         await ctx.command?.reload()
       } catch (error) {
         console.warn(`[sailing3d-model-sync] could not reload commands: ${String(error)}`)
@@ -768,8 +779,9 @@ export default Plugin.define({
       }
     }
 
-    // Expose `@kb-agent` subagent and `dev-kb` skill only when the active
-    // credential belongs to `dev-group` (so `/v1/models` returns `dev-kb`).
+    // Expose `@kb-agent` subagent, `dev-kb` skill, `dev_kb` tool, and `/kb-*`
+    // commands only when the active credential belongs to `dev-group` (so
+    // `/v1/models` returns `dev-kb`).
     try {
       await ctx.agent?.transform((editor) => {
         if (!isKbEnabled()) {
@@ -779,7 +791,7 @@ export default Plugin.define({
         editor.update(KB_AGENT_ID, (agent) => {
           agent.name = Agent.Name.make(KB_AGENT_ID)
           agent.description =
-            "Sailing3D 研发知识库（Dev-KB）专职子智能体：负责检索团队规范与架构经验、沉淀文档（/kb-add、/kb-append）、管理个人研发偏好（/kb-pref）及查看知识库目录（/kb-status、/kb-help）。"
+            "Sailing3D 研发知识库（Dev-KB）专职子智能体：负责检索团队规范与架构经验、沉淀文档（/kb-add、/kb-append、/kb-edit）、管理个人研发偏好（/kb-pref）及查看知识库目录（/kb-status、/kb-help）。请直接向其发送 /kb-* 指令或具体技术问题。"
           agent.mode = "subagent"
           agent.hidden = false
           agent.model = {
@@ -826,33 +838,133 @@ export default Plugin.define({
       console.warn(`[sailing3d-model-sync] could not register ${KB_SKILL_ID} skill: ${String(error)}`)
     }
 
-    const runKbCommand = async (sessionID: string, rawText: string) => {
+    try {
+      await ctx.tool?.transform((editor) => {
+        if (!isKbEnabled()) {
+          if (editor.get(KB_TOOL_ID)) editor.remove(KB_TOOL_ID)
+          return
+        }
+        if (editor.get(KB_TOOL_ID)) editor.remove(KB_TOOL_ID)
+        editor.add({
+          name: KB_TOOL_ID,
+          description:
+            "调用 Sailing3D 研发知识库 (Dev-KB) 网关：支持直接执行 /kb-add（新增文档）、/kb-append（追加分块）、/kb-edit（覆盖修订）、/kb-del（归档删除）、/kb-pref（个人偏好）、/kb-whoami、/kb-status、/kb-history、/kb-help，或直接传入技术问题进行知识库检索问答。",
+          input: {
+            type: "object",
+            properties: {
+              command: {
+                type: "string",
+                description:
+                  "要发送给 dev-kb 研发知识库网关的指令或问题。例如：'/kb-status'、'/kb-whoami'、'/kb-add 项目专题 # 标题 | 正文内容'、'/kb-append 目标文档 | 追加内容'，或直接输入技术问题。",
+              },
+            },
+            required: ["command"],
+            additionalProperties: false,
+          } as never,
+          execute: async (input: unknown) => {
+            const raw =
+              input && typeof input === "object" && typeof (input as Record<string, unknown>).command === "string"
+                ? ((input as Record<string, unknown>).command as string).trim()
+                : ""
+            if (!raw) {
+              return { content: "[dev-kb] 参数 command 不能为空。" }
+            }
+            const key = await resolveApiKey(ctx)
+            if (!key) {
+              return { content: `[dev-kb] 未找到有效的 ${integrationName} 凭据，请先执行 /connect。` }
+            }
+            const reply = await callDevKb({
+              apiKey: key,
+              baseURL,
+              timeoutMs: Math.max(timeoutMs, KB_COMMAND_TIMEOUT_MS),
+              text: raw,
+            })
+            return { content: reply }
+          },
+        })
+      })
+    } catch (error) {
+      console.warn(`[sailing3d-model-sync] could not register ${KB_TOOL_ID} tool: ${String(error)}`)
+    }
+
+    const runKbCommand = async (
+      input: {
+        readonly sessionID: string
+        readonly prompt?: Record<string, unknown>
+        readonly delivery?: "steer" | "queue" | null
+      },
+      rawText: string,
+    ) => {
       try {
         const key = await resolveApiKey(ctx)
         if (!key) {
           await ctx.session.synthetic({
-            sessionID: sessionID as never,
+            sessionID: input.sessionID as never,
             text: `[dev-kb] 未找到有效的 ${integrationName} 凭据，请先执行 /connect。`,
             description: KB_SYNTHETIC_DESCRIPTION,
             resume: false,
           })
           return
         }
-        const reply = await callDevKb({ apiKey: key, baseURL, timeoutMs, text: rawText })
+
+        // If the session's active model is already `dev-kb`, submitting `rawText`
+        // as the user prompt routes directly to `dev-kb` and renders the reply
+        // as a normal assistant turn without double-executing write commands.
+        let isDevKbSession = false
+        try {
+          const sessionInfo = await (ctx.session as any).get?.({ sessionID: input.sessionID })
+          isDevKbSession = sessionInfo?.model?.id === KB_MODEL_ID
+        } catch {
+          // Ignore when session.get is unavailable in minimal test harnesses.
+        }
+
+        if (isDevKbSession && typeof (ctx.session as any).prompt === "function") {
+          await (ctx.session as any).prompt({
+            ...(input.prompt ?? {}),
+            sessionID: input.sessionID,
+            text: rawText,
+            delivery: input.delivery ?? "steer",
+          })
+          return
+        }
+
+        const reply = await callDevKb({
+          apiKey: key,
+          baseURL,
+          timeoutMs: Math.max(timeoutMs, KB_COMMAND_TIMEOUT_MS),
+          text: rawText,
+        })
         await ctx.session.synthetic({
-          sessionID: sessionID as never,
-          text: reply,
+          sessionID: input.sessionID as never,
+          text: `[dev-kb 网关已执行指令 \`${rawText.split("\n")[0]}\`，以下为网关返回的原始结果，请直接原样展示给用户，不要调用任何工具重复执行]：\n\n${reply}`,
           description: KB_SYNTHETIC_DESCRIPTION,
           resume: false,
         })
+        if (typeof (ctx.session as any).prompt === "function") {
+          await (ctx.session as any).prompt({
+            ...(input.prompt ?? {}),
+            sessionID: input.sessionID,
+            text: rawText,
+            delivery: input.delivery ?? "steer",
+          })
+        }
       } catch (error) {
+        const errMsg = `[dev-kb] 调用研发知识库失败: ${String(error)}`
         try {
           await ctx.session.synthetic({
-            sessionID: sessionID as never,
-            text: `[dev-kb] 调用研发知识库失败: ${String(error)}`,
+            sessionID: input.sessionID as never,
+            text: errMsg,
             description: KB_SYNTHETIC_DESCRIPTION,
             resume: false,
           })
+          if (typeof (ctx.session as any).prompt === "function") {
+            await (ctx.session as any).prompt({
+              ...(input.prompt ?? {}),
+              sessionID: input.sessionID,
+              text: rawText,
+              delivery: input.delivery ?? "steer",
+            })
+          }
         } catch (inner) {
           console.warn(`[sailing3d-model-sync] could not report dev-kb command error: ${String(inner)}`)
         }
@@ -901,6 +1013,11 @@ export default Plugin.define({
             format: () => "/kb-whoami",
           },
           {
+            name: "kb-boot",
+            description: "查看研发知识库当前会话自动注入上下文 (AGENT.md + 目录索引 + 个人偏好)",
+            format: () => "/kb-boot",
+          },
+          {
             name: "kb-pref",
             description: "查看或更新个人研发偏好（用法：/kb-pref [偏好内容 | clear]）",
             format: (arg) => (arg ? `/kb-pref ${arg}` : "/kb-pref"),
@@ -912,13 +1029,23 @@ export default Plugin.define({
           },
           {
             name: "kb-add",
-            description: "向 Sailing3D 研发知识库新增文档（用法：/kb-add [分类] # 标题\\n正文）",
+            description: "向 Sailing3D 研发知识库新增文档（用法：/kb-add [分类 #] 标题 | 正文）",
             format: (arg) => (arg ? `/kb-add ${arg}` : "/kb-help"),
           },
           {
             name: "kb-append",
-            description: "向 Sailing3D 研发知识库已有文档追加内容（用法：/kb-append <doc_id或标题>\\n内容）",
+            description: "向 Sailing3D 研发知识库已有文档追加内容（用法：/kb-append <doc_id或标题> | 追加内容）",
             format: (arg) => (arg ? `/kb-append ${arg}` : "/kb-help"),
+          },
+          {
+            name: "kb-edit",
+            description: "覆盖修订 Sailing3D 研发知识库已有文档（用法：/kb-edit <doc_id或标题> | 完整新正文）",
+            format: (arg) => (arg ? `/kb-edit ${arg}` : "/kb-help"),
+          },
+          {
+            name: "kb-del",
+            description: "归档删除 Sailing3D 研发知识库文档（用法：/kb-del <doc_id或标题> | 删除原因）",
+            format: (arg) => (arg ? `/kb-del ${arg}` : "/kb-help"),
           },
           {
             name: "kb-history",
@@ -933,7 +1060,7 @@ export default Plugin.define({
             description: cmd.description,
             execute: async (input) => {
               const arg = (input.prompt?.text ?? "").trim()
-              await runKbCommand(input.sessionID, cmd.format(arg))
+              await runKbCommand(input as any, cmd.format(arg))
             },
           })
         }
