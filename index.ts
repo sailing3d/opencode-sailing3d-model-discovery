@@ -1,7 +1,7 @@
 import { readFile, readdir, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { Model, Plugin, Provider } from "@opencode/plugin"
+import { Agent, Model, Plugin, Provider, Skill } from "@opencode/plugin"
 
 const providerID = Provider.ID.make("sailing3d")
 // Provider integrations are referenced by id, never created implicitly: a plugin
@@ -16,6 +16,41 @@ const integrationName = "Sailing3D Gateway"
 // can be unregistered at startup, and as the provider's inert settings placeholder.
 const LEGACY_API_KEY_ENV = "SAILING3D_API_KEY"
 const cacheKey = "sailing3d-model-inventory-v1"
+
+// Dev-KB capabilities (`@kb-agent` subagent, `dev-kb` skill, and `/kb-*` slash
+// commands) are only exposed when the authenticated user's `/v1/models` list
+// includes `dev-kb` (gated by `dev-group` membership on the gateway).
+const KB_MODEL_ID = "dev-kb"
+const KB_AGENT_ID = "kb-agent"
+const KB_SKILL_ID = "dev-kb"
+const KB_SYNTHETIC_DESCRIPTION = "Sailing3D Dev-KB"
+
+const KB_SKILL_CONTENT = [
+  "# Sailing3D 研发知识库 (Dev-KB) 技能指南",
+  "",
+  "当前账号已具备 `dev-kb` 研发知识库访问权限。当对话涉及以下场景时，请优先委派给 `@kb-agent` 子智能体（`kb-agent`）或提示用户使用 `/kb-*` 斜杠命令：",
+  "",
+  "## 1. 适用场景",
+  "- 查询团队内部研发规范、系统架构、部署配置或历史排障经验",
+  "- 读取或更新当前开发者的个人研发偏好（代码风格、常用环境等）",
+  "- 将当前会话产出的架构方案、排障记录或配置规范沉淀到团队知识库",
+  "",
+  "## 2. 子智能体 `@kb-agent` 调用指令格式",
+  "向 `kb-agent` 发送单次请求即可直接返回知识库处理结果：",
+  "",
+  "| 操作意图 | 发送给 `kb-agent` 的消息格式 |",
+  "| --- | --- |",
+  "| 检索知识库问答 | 直接发送具体技术问题（或 `/kb-ask <问题>`） |",
+  "| 查看使用指南 | `/kb-help` |",
+  "| 查看身份与个人偏好 | `/kb-whoami` 或 `/kb-pref` |",
+  "| 新增/更新个人偏好 | `/kb-pref <偏好内容>`（清空发送 `/kb-pref clear`） |",
+  "| 查看知识库文档目录 | `/kb-status` |",
+  "| 新增知识库文档 | `/kb-add [分类] # 标题\\n正文内容`（可选分类：`架构与设计`、`部署与运维`、`接口与协议`、`踩坑与排障`、`编码与规范`） |",
+  "| 追加内容到已有文档 | `/kb-append <doc_id或标题>\\n追加正文` |",
+  "| 覆盖修订已有文档 | `/kb-edit <doc_id或标题>\\n完整新正文` |",
+  "| 删除知识库文档 | `/kb-del <doc_id或标题>` |",
+  "| 查看近期变更记录 | `/kb-history` |",
+].join("\n")
 
 // OpenCode does not re-run plugin setup when a credential is added or removed,
 // and it does not gate plugin-discovered models on credential availability the
@@ -272,7 +307,23 @@ function preserveConfiguredOverrides(
   })
 }
 
+const builtinModels: Record<string, InventoryRecord> = {
+  [KB_MODEL_ID]: {
+    provider: "sailing3d",
+    model: {
+      id: KB_MODEL_ID,
+      name: "Dev-KB (研发知识库)",
+      family: "dev-kb",
+      tool_call: false,
+      reasoning: false,
+      modalities: { input: ["text"], output: ["text"] },
+      limit: { context: 128_000, output: 16_384 },
+    },
+  },
+}
+
 function resolveCatalogModel(gatewayID: string, catalog: CatalogResponse): InventoryRecord | undefined {
+  if (builtinModels[gatewayID]) return builtinModels[gatewayID]
   const alias = aliases[gatewayID]
   const targetID = alias?.catalogID ?? gatewayID
   const matches: InventoryRecord[] = []
@@ -308,6 +359,39 @@ async function requestJSON<T>(url: string, headers: HeadersInit = {}, timeoutMs 
   const response = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) })
   if (!response.ok) throw new Error(`HTTP ${response.status} from ${new URL(url).host}`)
   return (await response.json()) as T
+}
+
+type ChatCompletionResponse = {
+  choices?: Array<{ message?: { content?: string } }>
+  error?: { message?: string }
+}
+
+async function callDevKb(input: {
+  apiKey: string
+  baseURL: string
+  timeoutMs: number
+  text: string
+}): Promise<string> {
+  const url = `${input.baseURL.replace(/\/+$/, "")}/chat/completions`
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${input.apiKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      model: KB_MODEL_ID,
+      stream: false,
+      messages: [{ role: "user", content: input.text }],
+    }),
+    signal: AbortSignal.timeout(input.timeoutMs),
+  })
+  if (!response.ok) throw new Error(`HTTP ${response.status} from ${new URL(url).host}`)
+  const data = (await response.json()) as ChatCompletionResponse
+  const content = data.choices?.[0]?.message?.content?.trim()
+  if (!content) throw new Error(data.error?.message ?? "empty response from dev-kb")
+  return content
 }
 
 function cacheDirectory(): string {
@@ -620,6 +704,27 @@ export default Plugin.define({
       )
     }
 
+    const isKbEnabled = (): boolean => enabled && models.some((model) => model.id === KB_MODEL_ID)
+
+    const reloadDomains = async (): Promise<void> => {
+      await ctx.provider.reload()
+      try {
+        await ctx.agent?.reload()
+      } catch (error) {
+        console.warn(`[sailing3d-model-sync] could not reload agents: ${String(error)}`)
+      }
+      try {
+        await ctx.skill?.reload()
+      } catch (error) {
+        console.warn(`[sailing3d-model-sync] could not reload skills: ${String(error)}`)
+      }
+      try {
+        await ctx.command?.reload()
+      } catch (error) {
+        console.warn(`[sailing3d-model-sync] could not reload commands: ${String(error)}`)
+      }
+    }
+
     let refreshing = false
     let pending = false
     // Returns a one-line summary so both the event path and the manual
@@ -638,7 +743,7 @@ export default Plugin.define({
           enabled = false
           models = []
           await clearCache(ctx)
-          await ctx.provider.reload()
+          await reloadDomains()
           const message = `no credential for ${integrationName}; removed the provider and cleared the cached inventory`
           console.warn(`[sailing3d-model-sync] ${message}`)
           return message
@@ -646,7 +751,7 @@ export default Plugin.define({
         const latest = mergeConfiguredModels(await discoverModels(key), configuredOverrides)
         models = latest
         enabled = true
-        await ctx.provider.reload()
+        await reloadDomains()
         await persist(latest)
         console.info(`[sailing3d-model-sync] refreshed ${latest.length} models`)
         return `refreshed ${latest.length} models from ${gatewayURL} in ${elapsed()}`
@@ -663,8 +768,100 @@ export default Plugin.define({
       }
     }
 
+    // Expose `@kb-agent` subagent and `dev-kb` skill only when the active
+    // credential belongs to `dev-group` (so `/v1/models` returns `dev-kb`).
+    try {
+      await ctx.agent?.transform((editor) => {
+        if (!isKbEnabled()) {
+          if (editor.get(KB_AGENT_ID)) editor.remove(KB_AGENT_ID)
+          return
+        }
+        editor.update(KB_AGENT_ID, (agent) => {
+          agent.name = Agent.Name.make(KB_AGENT_ID)
+          agent.description =
+            "Sailing3D 研发知识库（Dev-KB）专职子智能体：负责检索团队规范与架构经验、沉淀文档（/kb-add、/kb-append）、管理个人研发偏好（/kb-pref）及查看知识库目录（/kb-status、/kb-help）。"
+          agent.mode = "subagent"
+          agent.hidden = false
+          agent.model = {
+            providerID,
+            id: Model.ID.make(KB_MODEL_ID),
+          }
+          agent.system =
+            "你是研发团队开发知识库（Dev-KB）专职助手。请直接将用户的查询问题或 /kb-* 指令原样提交并输出知识库网关返回的内容，不要调用任何本地工具。"
+          agent.permissions = [{ action: "*", resource: "*", effect: "deny" }]
+        })
+      })
+    } catch (error) {
+      console.warn(`[sailing3d-model-sync] could not register @${KB_AGENT_ID}: ${String(error)}`)
+    }
+
+    try {
+      await ctx.skill?.transform((editor) => {
+        if (!isKbEnabled()) {
+          if (editor.get(KB_SKILL_ID)) editor.remove(KB_SKILL_ID)
+          return
+        }
+        const skillInfo: Skill.Info = {
+          id: Skill.ID.make(KB_SKILL_ID),
+          name: Skill.Name.make(KB_SKILL_ID),
+          description:
+            "Sailing3D 研发知识库（Dev-KB）检索、文档沉淀与个人研发偏好管理技能。当需要查询团队规范/架构文档、沉淀项目经验或设置个人研发偏好时使用。",
+          autoinvoke: true,
+          path: join(cacheDirectory(), "skills", KB_SKILL_ID, "SKILL.md") as Skill.Info["path"],
+          content: KB_SKILL_CONTENT,
+        }
+        if (editor.get(KB_SKILL_ID)) {
+          editor.update(KB_SKILL_ID, (skill) => {
+            skill.name = skillInfo.name
+            skill.description = skillInfo.description
+            skill.autoinvoke = skillInfo.autoinvoke
+            skill.path = skillInfo.path
+            skill.content = skillInfo.content
+          })
+        } else {
+          editor.add(skillInfo)
+        }
+      })
+    } catch (error) {
+      console.warn(`[sailing3d-model-sync] could not register ${KB_SKILL_ID} skill: ${String(error)}`)
+    }
+
+    const runKbCommand = async (sessionID: string, rawText: string) => {
+      try {
+        const key = await resolveApiKey(ctx)
+        if (!key) {
+          await ctx.session.synthetic({
+            sessionID: sessionID as never,
+            text: `[dev-kb] 未找到有效的 ${integrationName} 凭据，请先执行 /connect。`,
+            description: KB_SYNTHETIC_DESCRIPTION,
+            resume: false,
+          })
+          return
+        }
+        const reply = await callDevKb({ apiKey: key, baseURL, timeoutMs, text: rawText })
+        await ctx.session.synthetic({
+          sessionID: sessionID as never,
+          text: reply,
+          description: KB_SYNTHETIC_DESCRIPTION,
+          resume: false,
+        })
+      } catch (error) {
+        try {
+          await ctx.session.synthetic({
+            sessionID: sessionID as never,
+            text: `[dev-kb] 调用研发知识库失败: ${String(error)}`,
+            description: KB_SYNTHETIC_DESCRIPTION,
+            resume: false,
+          })
+        } catch (inner) {
+          console.warn(`[sailing3d-model-sync] could not report dev-kb command error: ${String(inner)}`)
+        }
+      }
+    }
+
     // Manual entry point for when the automatic triggers are not enough
-    // (a gateway-side rename, a fix that needs an immediate re-check, ...).
+    // (a gateway-side rename, a fix that needs an immediate re-check, ...),
+    // plus `/kb-*` commands when the user's group exposes `dev-kb`.
     try {
       await ctx.command.transform((editor) => {
         editor.add({
@@ -684,9 +881,65 @@ export default Plugin.define({
             }
           },
         })
+
+        if (!isKbEnabled()) return
+
+        const kbCommands: Array<{ name: string; description: string; format: (arg: string) => string }> = [
+          {
+            name: "kb-help",
+            description: "查看 Sailing3D 研发知识库 (Dev-KB) 使用指南与快捷指令",
+            format: () => "/kb-help",
+          },
+          {
+            name: "kb-status",
+            description: "查看 Sailing3D 研发知识库 (Dev-KB) 文档目录与状态",
+            format: () => "/kb-status",
+          },
+          {
+            name: "kb-whoami",
+            description: "查看当前账号在研发知识库中的身份与个人偏好",
+            format: () => "/kb-whoami",
+          },
+          {
+            name: "kb-pref",
+            description: "查看或更新个人研发偏好（用法：/kb-pref [偏好内容 | clear]）",
+            format: (arg) => (arg ? `/kb-pref ${arg}` : "/kb-pref"),
+          },
+          {
+            name: "kb-ask",
+            description: "检索 Sailing3D 研发知识库（用法：/kb-ask <问题>）",
+            format: (arg) => (arg ? `/kb-ask ${arg}` : "/kb-help"),
+          },
+          {
+            name: "kb-add",
+            description: "向 Sailing3D 研发知识库新增文档（用法：/kb-add [分类] # 标题\\n正文）",
+            format: (arg) => (arg ? `/kb-add ${arg}` : "/kb-help"),
+          },
+          {
+            name: "kb-append",
+            description: "向 Sailing3D 研发知识库已有文档追加内容（用法：/kb-append <doc_id或标题>\\n内容）",
+            format: (arg) => (arg ? `/kb-append ${arg}` : "/kb-help"),
+          },
+          {
+            name: "kb-history",
+            description: "查看 Sailing3D 研发知识库近期变更记录",
+            format: (arg) => (arg ? `/kb-history ${arg}` : "/kb-history"),
+          },
+        ]
+
+        for (const cmd of kbCommands) {
+          editor.add({
+            name: cmd.name,
+            description: cmd.description,
+            execute: async (input) => {
+              const arg = (input.prompt?.text ?? "").trim()
+              await runKbCommand(input.sessionID, cmd.format(arg))
+            },
+          })
+        }
       })
     } catch (error) {
-      console.warn(`[sailing3d-model-sync] could not register /sailing3d-refresh: ${String(error)}`)
+      console.warn(`[sailing3d-model-sync] could not register commands: ${String(error)}`)
     }
 
     const timer = setInterval(() => void refresh(), refreshMs)

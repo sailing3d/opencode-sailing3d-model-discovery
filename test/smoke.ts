@@ -86,6 +86,8 @@ type FakeState = {
   integration: Record<string, any> | undefined
   integrationMethods: Array<Record<string, any>>
   removedMethods: Array<{ integrationID: string; method: Record<string, any> }>
+  agents: Map<string, Record<string, any>>
+  skills: Map<string, Record<string, any>>
   commands: Array<{ name: string; description?: string; execute: (input: any) => Promise<void> }>
   synthetic: Array<Record<string, any>>
 }
@@ -93,12 +95,21 @@ type FakeState = {
 const originalFetch = globalThis.fetch
 let lastAuth: string | undefined
 let remoteCatalogFetches = 0
+let gatewayIds = ids
+let lastChatRequest: Record<string, any> | undefined
 
 globalThis.fetch = async (input, init) => {
   const url = String(input)
   if (url.includes("/v1/models")) {
     lastAuth = new Headers(init?.headers).get("authorization") ?? undefined
-    return Response.json({ data: ids.map((id) => ({ id })) })
+    return Response.json({ data: gatewayIds.map((id) => ({ id })) })
+  }
+  if (url.includes("/v1/chat/completions")) {
+    lastAuth = new Headers(init?.headers).get("authorization") ?? undefined
+    lastChatRequest = JSON.parse(String(init?.body ?? "{}"))
+    return Response.json({
+      choices: [{ message: { content: `[dev-kb reply] handled: ${lastChatRequest?.messages?.[0]?.content ?? ""}` } }],
+    })
   }
   if (url === "https://models.dev/api.json") {
     remoteCatalogFetches++
@@ -135,12 +146,17 @@ function createContext(options: {
     integration: undefined,
     integrationMethods: [],
     removedMethods: [],
+    agents: new Map(),
+    skills: new Map(),
     commands: [],
     synthetic: [],
   }
 
   const removedProviders = new Set<string>()
   const transforms: Array<(editor: any) => void> = []
+  const agentTransforms: Array<(editor: any) => void> = []
+  const skillTransforms: Array<(editor: any) => void> = []
+  const commandTransforms: Array<(editor: any) => void> = []
 
   const makeEditor = () => ({
     get: (providerID: string) =>
@@ -177,6 +193,50 @@ function createContext(options: {
     },
   })
 
+  const makeAgentEditor = () => ({
+    list: () => [...state.agents.values()],
+    get: (id: string) => state.agents.get(id),
+    default: () => {},
+    update: (id: string, mutate: (agent: Record<string, any>) => void) => {
+      const agent = state.agents.get(id) ?? {
+        id,
+        name: id,
+        request: { settings: {}, headers: {}, body: {} },
+        mode: "primary",
+        hidden: false,
+        permissions: [],
+      }
+      mutate(agent)
+      state.agents.set(id, agent)
+    },
+    remove: (id: string) => {
+      state.agents.delete(id)
+    },
+  })
+
+  const makeSkillEditor = () => ({
+    list: () => [...state.skills.values()],
+    get: (id: string) => state.skills.get(id),
+    add: (skill: Record<string, any>) => {
+      state.skills.set(skill.id, { ...skill })
+    },
+    update: (id: string, mutate: (skill: Record<string, any>) => void) => {
+      const existing = state.skills.get(id)
+      if (!existing) return
+      mutate(existing)
+      state.skills.set(id, existing)
+    },
+    remove: (id: string) => {
+      state.skills.delete(id)
+    },
+  })
+
+  const makeCommandEditor = () => ({
+    add: (definition: { name: string; description?: string; execute: (input: any) => Promise<void> }) => {
+      state.commands.push(definition)
+    },
+  })
+
   const configuredModel = {
     id: "deepseek-flash",
     name: "My DeepSeek alias",
@@ -198,6 +258,24 @@ function createContext(options: {
         state.reloads++
         // The real host re-applies every registered transform on reload.
         for (const callback of transforms) callback(makeEditor())
+      },
+    },
+    agent: {
+      transform: async (callback: (editor: any) => void) => {
+        agentTransforms.push(callback)
+        callback(makeAgentEditor())
+      },
+      reload: async () => {
+        for (const callback of agentTransforms) callback(makeAgentEditor())
+      },
+    },
+    skill: {
+      transform: async (callback: (editor: any) => void) => {
+        skillTransforms.push(callback)
+        callback(makeSkillEditor())
+      },
+      reload: async () => {
+        for (const callback of skillTransforms) callback(makeSkillEditor())
       },
     },
     integration: {
@@ -230,14 +308,14 @@ function createContext(options: {
     },
     command: {
       transform: async (callback: (editor: any) => void) => {
-        callback({
-          add: (definition: { name: string; description?: string; execute: (input: any) => Promise<void> }) => {
-            state.commands.push(definition)
-          },
-        })
+        commandTransforms.push(callback)
+        callback(makeCommandEditor())
       },
       list: async () => ({ data: state.commands.map(({ name, description }) => ({ name, description })) }),
-      reload: async () => {},
+      reload: async () => {
+        state.commands = []
+        for (const callback of commandTransforms) callback(makeCommandEditor())
+      },
     },
     session: {
       synthetic: async (input: Record<string, any>) => {
@@ -621,12 +699,98 @@ process.env.SAILING3D_API_KEY = "env-key"
   await cleanup?.()
 }
 
+// 18. Without `dev-kb` in `/v1/models` (or without any API key on first install),
+//     `@kb-agent`, `dev-kb` skill, and `/kb-*` commands are NOT exposed.
+{
+  // First install: no API key
+  const { context: ctxNoKey, state: stateNoKey } = createContext()
+  const cleanupNoKey = await plugin.setup(ctxNoKey)
+  assert.equal(stateNoKey.agents.get("kb-agent"), undefined)
+  assert.equal(stateNoKey.skills.get("dev-kb"), undefined)
+  assert.deepEqual(stateNoKey.commands.map(({ name }) => name), ["sailing3d-refresh"])
+  await cleanupNoKey?.()
+
+  // Default user group: API key present, but `/v1/models` does not return `dev-kb`
+  const { context: ctxDefault, state: stateDefault } = createContext({ connectKey: "default-user-key" })
+  const cleanupDefault = await plugin.setup(ctxDefault)
+  assert.equal(stateDefault.agents.get("kb-agent"), undefined)
+  assert.equal(stateDefault.skills.get("dev-kb"), undefined)
+  assert.deepEqual(stateDefault.commands.map(({ name }) => name), ["sailing3d-refresh"])
+  await cleanupDefault?.()
+}
+
+// 19. When a `dev-group` user connects (so `/v1/models` includes `dev-kb`),
+//     `@kb-agent`, `dev-kb` skill, and `/kb-*` commands are injected without
+//     triggering a remote models.dev fetch; logging out removes them again.
+{
+  const fetchesBefore = remoteCatalogFetches
+  gatewayIds = [...ids, "dev-kb"]
+  const options = { connectKey: undefined as string | undefined, emitEvents: ["credential.updated"], eventDelayMs: 30 }
+  const { context, state } = createContext(options)
+  const cleanup = await plugin.setup(context)
+
+  // Before /connect: nothing exposed
+  assert.equal(state.agents.get("kb-agent"), undefined)
+  assert.equal(state.skills.get("dev-kb"), undefined)
+  assert.deepEqual(state.commands.map(({ name }) => name), ["sailing3d-refresh"])
+
+  // User connects with a dev-group key
+  options.connectKey = "dev-group-key"
+  await new Promise((resolve) => setTimeout(resolve, 600))
+
+  // Built-in dev-kb metadata prevents unnecessary models.dev fallback fetch
+  assert.equal(remoteCatalogFetches, fetchesBefore, "dev-kb must not trigger a remote models.dev fetch")
+  const devKbModel = state.addedModels.find(({ id }) => id === "dev-kb")
+  assert.ok(devKbModel, "expected dev-kb model to be registered")
+  assert.equal(devKbModel.name, "Dev-KB (研发知识库)")
+  assert.equal(devKbModel.capabilities.tools, false)
+
+  // @kb-agent subagent is registered
+  const kbAgent = state.agents.get("kb-agent")
+  assert.ok(kbAgent, "expected @kb-agent to be registered for dev-group user")
+  assert.equal(kbAgent.mode, "subagent")
+  assert.equal(kbAgent.model.id, "dev-kb")
+  assert.equal(kbAgent.model.providerID, "sailing3d")
+
+  // dev-kb skill is registered with autoinvoke
+  const kbSkill = state.skills.get("dev-kb")
+  assert.ok(kbSkill, "expected dev-kb skill to be registered for dev-group user")
+  assert.equal(kbSkill.autoinvoke, true)
+  assert.match(kbSkill.content, /@kb-agent/)
+
+  // /kb-* commands are registered and forward to /v1/chat/completions (model: dev-kb)
+  const commandNames = state.commands.map(({ name }) => name)
+  assert.ok(commandNames.includes("kb-help"))
+  assert.ok(commandNames.includes("kb-pref"))
+  assert.ok(commandNames.includes("kb-add"))
+  assert.ok(commandNames.includes("kb-ask"))
+
+  const kbPrefCmd = state.commands.find(({ name }) => name === "kb-pref")!
+  await kbPrefCmd.execute({ sessionID: "ses_kb", prompt: { text: "优先使用 TypeScript" } })
+  assert.equal(lastChatRequest?.model, "dev-kb")
+  assert.equal(lastChatRequest?.messages?.[0]?.content, "/kb-pref 优先使用 TypeScript")
+  assert.equal(state.synthetic.at(-1)?.sessionID, "ses_kb")
+  assert.equal(state.synthetic.at(-1)?.description, "Sailing3D Dev-KB")
+  assert.match(state.synthetic.at(-1)?.text ?? "", /\[dev-kb reply\] handled: \/kb-pref 优先使用 TypeScript/)
+
+  // Switching to a non-dev-group user removes @kb-agent, dev-kb skill, and /kb-* commands
+  gatewayIds = ids
+  const refreshCmd = state.commands.find(({ name }) => name === "sailing3d-refresh")!
+  await refreshCmd.execute({ sessionID: "ses_kb" })
+  assert.equal(state.agents.get("kb-agent"), undefined, "expected @kb-agent to be removed when dev-kb is no longer in /v1/models")
+  assert.equal(state.skills.get("dev-kb"), undefined, "expected dev-kb skill to be removed when dev-kb is no longer in /v1/models")
+  assert.deepEqual(state.commands.map(({ name }) => name), ["sailing3d-refresh"])
+
+  await cleanup?.()
+}
+
 globalThis.fetch = originalFetch
 await rm(catalogDir, { recursive: true, force: true })
 console.log(
   JSON.stringify({
     provider: "sailing3d",
-    scenarios: 17,
+    scenarios: 19,
     modelCount: ids.length,
   }),
 )
+
